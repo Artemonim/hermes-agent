@@ -5,6 +5,7 @@ import { useNavigate } from 'react-router'
 import { ConnectionSwitcher } from '@/app/chat/sidebar/connection-switcher'
 import type { CommandCenterSection } from '@/app/command-center'
 import { useApprovalModeStatusbarItem } from '@/app/shell/approval-mode-menu'
+import { useCodexUsageStatusbarItem } from '@/app/shell/codex-usage-statusbar-item'
 import { ContextUsagePanel } from '@/app/shell/context-usage-panel'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { useContextBreakdown } from '@/app/shell/hooks/use-context-breakdown'
@@ -41,6 +42,7 @@ import {
   $busy,
   $connection,
   $currentCwd,
+  $currentProvider,
   $currentUsage,
   $selectedStoredSessionId,
   $sessions,
@@ -114,6 +116,7 @@ export function useStatusbarItems({
   // primary (or a draft with no runtime slice yet). A focused TILE keeps its
   // own cwd in `$sessionStates` and must not paint the primary's workspace.
   const primaryCwd = useStore($currentCwd)
+  const primaryProvider = useStore($currentProvider)
   const primaryUsage = useStore($currentUsage)
   const gatewayRestarting = useStore($gatewayRestarting)
   const primarySessionStartedAt = useStore($sessionStartedAt)
@@ -157,6 +160,7 @@ export function useStatusbarItems({
   // bail-out key on its own.
   const focusedUsage = useStoreSelector($focusedSessionState, state => state?.usage ?? null)
   const focusedStateCwd = useStoreSelector($focusedSessionState, state => state?.cwd?.trim() || '')
+  const focusedProvider = useStoreSelector($focusedSessionState, state => state?.provider ?? null)
 
   // Runtime slices carry the stored id they were bound for. During a primary
   // tab switch the runtime id can lag a frame behind the new selection — the
@@ -169,6 +173,7 @@ export function useStatusbarItems({
 
   const activeSessionId = primaryFocused ? primaryActiveSessionId : (focusedRuntimeId ?? null)
   const busy = primaryFocused ? primaryBusy : focusedBusy
+  const provider = primaryFocused ? (primaryProvider ?? '') : (focusedProvider ?? '')
 
   // EMPTY_USAGE (module constant) keeps the fallback referentially stable —
   // a fresh `{...}` each render would bust the usage-label memos below.
@@ -286,6 +291,13 @@ export function useStatusbarItems({
 
   const approvalModeItem = useApprovalModeStatusbarItem(activeGatewayProfile, requestGateway)
   const systemResourcesItem = useSystemResourcesStatusbarItem()
+
+  const codexUsageItem = useCodexUsageStatusbarItem({
+    gatewayState,
+    provider,
+    requestGateway,
+    sessionId: activeSessionId
+  })
 
   const gatewayMenuContent = useMemo(
     () => (close: () => void) => (
@@ -562,6 +574,7 @@ export function useStatusbarItems({
         toggleLabel: copy.toggleRunningTimer,
         variant: 'text'
       },
+      codexUsageItem,
       {
         detail: contextBar || undefined,
         // Never self-hide: the user opted this item in (it's hidden-by-
@@ -631,6 +644,7 @@ export function useStatusbarItems({
       cacheHit,
       chatOpen,
       clientVersionItem,
+      codexUsageItem,
       contextBar,
       contextBreakdown,
       contextBreakdownLoading,

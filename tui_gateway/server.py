@@ -387,6 +387,10 @@ _LONG_HANDLERS = frozenset(
         # so a delayed status rehydrate cannot block runtime readiness, prompt
         # submission, or interrupts queued behind it on the same socket.
         "session.active_list",
+        # Account-limit probes call provider-owned HTTP endpoints. Keep the
+        # Desktop's periodic status-bar refresh off the JSON-RPC reader thread
+        # so a slow or unavailable provider cannot stall chat and interrupts.
+        "session.account_usage",
         "session.branch",
         "session.compress",
         "session.list",
