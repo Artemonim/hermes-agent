@@ -14,6 +14,7 @@ import { $paneVisible, togglePaneVisible } from '@/components/pane-shell/tree/st
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
 import { useI18n } from '@/i18n'
+import type { GatewayRequester } from '@/hooks/use-codex-account-usage'
 import { displayPath, pathLeaf } from '@/lib/display-path'
 import {
   Activity,
@@ -81,7 +82,7 @@ interface StatusbarItemsOptions {
   openAgents: () => void
   openCommandCenterSection: (section: CommandCenterSection) => void
   freshDraftReady: boolean
-  requestGateway: <T = unknown>(method: string, params?: Record<string, unknown>) => Promise<T>
+  requestGateway: GatewayRequester
   statusSnapshot: StatusResponse | null
   toggleCommandCenter: () => void
 }
@@ -293,7 +294,9 @@ export function useStatusbarItems({
   const systemResourcesItem = useSystemResourcesStatusbarItem()
 
   const codexUsageItem = useCodexUsageStatusbarItem({
+    connectionScope: `${connection?.mode ?? 'unknown'}:${connection?.baseUrl ?? ''}`,
     gatewayState,
+    profile: activeGatewayProfile,
     provider,
     requestGateway,
     sessionId: activeSessionId
