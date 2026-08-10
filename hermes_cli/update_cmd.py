@@ -791,15 +791,21 @@ def _update_via_zip(args):
     # rather than lie.
     branch = _m()._resolve_update_branch(args)
     if branch != "main":
+        explicit_branch = getattr(args, "branch", None)
+        retry_command = (
+            f"hermes update --branch {branch}"
+            if isinstance(explicit_branch, str) and explicit_branch.strip()
+            else "hermes update"
+        )
         print(
-            f"✗ --branch={branch} is not supported on the Windows ZIP-fallback "
+            f"✗ Branch '{branch}' is not supported on the Windows ZIP-fallback "
             "update path."
         )
         print(
             "  This path runs when git file I/O is broken on the system. "
             "Either resolve the git-side breakage (typically an antivirus "
-            "or NTFS filter holding files open) and rerun `hermes update "
-            f"--branch {branch}`, or update against main with `hermes update`."
+            f"or NTFS filter holding files open) and rerun `{retry_command}`, "
+            "or update against main with `hermes update --branch main`."
         )
         _m().sys.exit(1)
     zip_url = (

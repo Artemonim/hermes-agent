@@ -9118,14 +9118,24 @@ def _finalize_update_output(state):
 
 
 def _resolve_update_branch(args) -> str:
-    """Normalize ``args.branch`` into a non-empty branch name.
+    """Resolve an explicit or configured update branch.
 
-    Centralizes the "default to main, accept --branch override, treat empty
-    or whitespace-only values as the default" parsing so every consumer of
-    ``--branch`` (check path, git-update path, ZIP-fallback path) agrees on
-    the same answer.
+    An explicit non-empty ``--branch`` takes precedence over
+    ``updates.branch``. A missing or invalid branch value falls back to
+    ``main`` so every update path agrees on one target.
     """
-    return (getattr(args, "branch", None) or "main").strip() or "main"
+    explicit_branch = getattr(args, "branch", None)
+    if isinstance(explicit_branch, str) and explicit_branch.strip():
+        return explicit_branch.strip()
+
+    from hermes_cli.config import load_config
+
+    updates = (load_config() or {}).get("updates", {})
+    configured_branch = updates.get("branch") if isinstance(updates, dict) else None
+    if isinstance(configured_branch, str) and configured_branch.strip():
+        return configured_branch.strip()
+
+    return "main"
 
 
 def _size_delta_label(saved_mb: float) -> str:

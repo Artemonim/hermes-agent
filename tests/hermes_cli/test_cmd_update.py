@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 import pytest
 
-from hermes_cli.main import cmd_update, PROJECT_ROOT
+from hermes_cli.main import _resolve_update_branch, cmd_update, PROJECT_ROOT
 
 
 def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
@@ -457,8 +457,8 @@ class TestCmdUpdateProfileSkillSync:
 class TestCmdUpdateBranchFlag:
     """``hermes update --branch <name>`` targets the requested branch.
 
-    The CLI default stays 'main'; --branch lets callers pick a different
-    target without monkey-patching the implementation.
+    A configured branch is the default; --branch lets callers override it
+    without monkey-patching the implementation.
     """
 
     def _branch_side_effect(self, current_branch, target_branch, *, checkout_fails=False, track_fails=False, commit_count="0"):
@@ -518,6 +518,25 @@ class TestCmdUpdateBranchFlag:
         merge_cmds = [c for c in commands if "merge --ff-only" in c]
         assert any("origin/bb/gui" in c and "origin/main" not in c for c in merge_cmds), merge_cmds
 
+    @patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}})
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_configured_branch_pulls_against_named_branch(
+        self, mock_run, _mock_which, _mock_config, capsys
+    ):
+        """A configured branch drives the apply path when --branch is omitted."""
+        mock_run.side_effect = self._branch_side_effect(
+            current_branch="dev", target_branch="dev", commit_count="3"
+        )
+
+        cmd_update(SimpleNamespace())
+
+        commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
+        rev_list_cmds = [c for c in commands if "rev-list" in c]
+        merge_cmds = [c for c in commands if "merge --ff-only" in c]
+        assert any("origin/dev" in c for c in rev_list_cmds), rev_list_cmds
+        assert any("origin/dev" in c for c in merge_cmds), merge_cmds
+
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
@@ -539,6 +558,35 @@ class TestCmdUpdateBranchFlag:
         out = capsys.readouterr().out
         assert "does not exist locally or on origin" in out
         assert "nonexistent" in out
+
+
+class TestResolveUpdateBranch:
+    """Configured update branches are shared by CLI and gateway updates."""
+
+    def test_uses_configured_branch_when_flag_is_omitted(self, tmp_path, monkeypatch):
+        import hermes_cli.config as config_module
+
+        (tmp_path / "config.yaml").write_text("updates:\n  branch: dev\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        config_module._LOAD_CONFIG_CACHE.clear()
+        config_module._RAW_CONFIG_CACHE.clear()
+        try:
+            assert _resolve_update_branch(SimpleNamespace()) == "dev"
+        finally:
+            config_module._LOAD_CONFIG_CACHE.clear()
+            config_module._RAW_CONFIG_CACHE.clear()
+
+    def test_explicit_branch_overrides_configured_branch(self):
+        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}}):
+            assert _resolve_update_branch(SimpleNamespace(branch="main")) == "main"
+
+    def test_whitespace_flag_uses_configured_branch(self):
+        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}}):
+            assert _resolve_update_branch(SimpleNamespace(branch="   ")) == "dev"
+
+    def test_invalid_configured_branch_falls_back_to_main(self):
+        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "   "}}):
+            assert _resolve_update_branch(SimpleNamespace(branch="")) == "main"
 
 
 class TestCmdUpdateCheckBranchFlag:
@@ -617,6 +665,26 @@ class TestCmdUpdateCheckBranchFlag:
         assert not any("origin/main" in c for c in rev_list_cmds), rev_list_cmds
 
     @patch("hermes_cli.config.detect_install_method", return_value="git")
+    @patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}})
+    @patch("subprocess.run")
+    def test_check_uses_configured_branch_when_flag_is_omitted(
+        self, mock_run, _mock_config, _mock_method, capsys
+    ):
+        """A configured branch drives --check when --branch is omitted."""
+        mock_run.side_effect = self._check_side_effect(
+            target_branch="dev", verify_ok=True, commit_count="2"
+        )
+
+        cmd_update(SimpleNamespace(check=True, branch=None))
+
+        commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
+        assert not any("fetch" in c and "upstream" in c for c in commands), commands
+        verify_cmds = [c for c in commands if "rev-parse" in c and "--verify" in c]
+        rev_list_cmds = [c for c in commands if "rev-list" in c]
+        assert any("origin/dev" in c for c in verify_cmds), verify_cmds
+        assert any("origin/dev" in c for c in rev_list_cmds), rev_list_cmds
+
+    @patch("hermes_cli.config.detect_install_method", return_value="git")
     @patch("subprocess.run")
     def test_check_branch_missing_on_origin_exits_cleanly(
         self, mock_run, _mock_method, capsys
@@ -669,10 +737,10 @@ class TestCmdUpdateCheckBranchFlag:
 
 
 class TestCmdUpdateZipBranchRefusal:
-    """``hermes update --branch=<non-main>`` must refuse on the ZIP fallback path.
+    """Non-main update targets must refuse on the ZIP fallback path.
 
     The ZIP fallback hard-codes a GitHub archive URL for main.zip; honoring
-    --branch arbitrarily would require remote-branch existence checks the
+    another branch arbitrarily would require remote-branch existence checks the
     fallback can't easily do. Refusing is the right move — silently lying
     about which branch got installed is the bug --branch was meant to prevent.
     """
@@ -688,8 +756,24 @@ class TestCmdUpdateZipBranchRefusal:
         out = capsys.readouterr().out
         assert "bb/gui" in out
         assert "not supported" in out
+        assert "rerun `hermes update --branch bb/gui`" in out
         # No actual download attempted.
         assert "Downloading latest version" not in out
+
+    def test_zip_fallback_for_configured_branch_shows_main_override(self, capsys):
+        from hermes_cli.main import _update_via_zip
+
+        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}}):
+            with pytest.raises(SystemExit) as exc_info:
+                _update_via_zip(SimpleNamespace(branch=None))
+        assert exc_info.value.code == 1
+
+        out = capsys.readouterr().out
+        assert "Branch 'dev'" in out
+        assert "rerun `hermes update`" in out
+        assert "rerun `hermes update --branch dev`" not in out
+        assert "hermes update --branch main" in out
+        assert "--branch=dev" not in out
 
 
 def test_is_termux_env_true_for_termux_prefix():

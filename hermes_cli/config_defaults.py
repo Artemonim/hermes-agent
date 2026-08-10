@@ -2845,6 +2845,8 @@ DEFAULT_CONFIG = {
 
     # ``hermes update`` behaviour.
     "updates": {
+        # * Default git branch for `hermes update` when --branch is omitted.
+        "branch": "main",
         # Pre-update safety backup — ONE consolidated mechanism, three modes:
         #
         #   quick (default) — snapshot critical small state files (pairing
