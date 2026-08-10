@@ -34,6 +34,9 @@ data/
 .pytest_cache/
 test_durations.json
 .pytest-cache/
+.ci_cache/
+.enforcer/
+.temporary/
 tmp/
 temp_vision_images/
 hermes-*/*

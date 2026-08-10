@@ -1335,6 +1335,14 @@ scripts/run_tests.sh tests/agent/test_foo.py -k test_x  # one test (file + -k; t
 scripts/run_tests.sh -v --tb=long                     # pass-through pytest flags
 ```
 
+### Fork-local AE2
+
+`run.ps1` is the fork-local AgentEnforcer2-compatible entry point. Use
+`./run.ps1 -Fast -SkipLaunch` for an affected-lane check, or omit `-Fast` for
+the full local pipeline. It never replaces task-specific verification through
+`scripts/run_tests.sh`; the fast profile intentionally runs only changed Python
+test files and does not infer tests from production-source changes.
+
 **Flake policy:** the runner auto-retries a failing test FILE once in a fresh
 subprocess (`--file-retries`, default 1; `HERMES_TEST_FILE_RETRIES=0` to
 disable). Pass-on-retry counts as green but is printed in a `⚠ FLAKY` summary
