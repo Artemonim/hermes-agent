@@ -573,6 +573,33 @@ def _provider_preferences_for_agent(agent) -> Dict[str, Any]:
     return preferences
 
 
+def _effective_request_overrides(agent) -> Dict[str, Any]:
+    """Return request overrides with the agent's service tier applied.
+
+    Explicit request overrides always win.  This lets API-server, TUI, and
+    programmatic callers use ``agent.service_tier`` without reimplementing
+    the model-specific priority/fast mapping at every entry point.
+    """
+    overrides = dict(getattr(agent, "request_overrides", {}) or {})
+    if "service_tier" in overrides or "speed" in overrides:
+        return overrides
+
+    try:
+        from hermes_cli.models import resolve_service_tier_overrides
+
+        tier_overrides = resolve_service_tier_overrides(
+            getattr(agent, "model", None),
+            getattr(agent, "service_tier", None),
+            provider=getattr(agent, "provider", None),
+            base_url=getattr(agent, "base_url", None),
+        )
+    except Exception:
+        tier_overrides = None
+    if tier_overrides:
+        overrides.update(tier_overrides)
+    return overrides
+
+
 def _prompt_cache_scope_for_agent(agent) -> "str | None":
     """Rotation-stable logical cache scope for *agent*, or None.
 
@@ -1830,6 +1857,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     """Build the keyword arguments dict for the active API mode."""
     if tools_for_api is None:
         tools_for_api = agent.tools
+    request_overrides = _effective_request_overrides(agent)
 
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()
@@ -1849,7 +1877,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
             preserve_dots=agent._anthropic_preserve_dots(),
             context_length=ctx_len,
             base_url=getattr(agent, "_anthropic_base_url", None),
-            fast_mode=(agent.request_overrides or {}).get("speed") == "fast",
+            fast_mode=request_overrides.get("speed") == "fast",
             drop_context_1m_beta=bool(getattr(agent, "_oauth_1m_beta_disabled", False)),
         )
         # Nous Portal reads ``tags`` and ``session_id`` as top-level body fields
@@ -1942,7 +1970,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
             base_url=agent.base_url,
             max_tokens=agent.max_tokens,
             timeout=agent._resolved_api_call_timeout(),
-            request_overrides=agent.request_overrides,
+            request_overrides=request_overrides,
             provider=getattr(agent, "provider", None),
             is_github_responses=is_github_responses,
             is_codex_backend=is_codex_backend,
@@ -2094,7 +2122,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
             ephemeral_max_output_tokens=_ephemeral_out,
             max_tokens_param_fn=agent._max_tokens_param,
             reasoning_config=agent.reasoning_config,
-            request_overrides=agent.request_overrides,
+            request_overrides=request_overrides,
             session_id=getattr(agent, "session_id", None),
             cache_scope_id=_cache_scope_id,
             provider_profile=_profile,
@@ -2127,7 +2155,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         ephemeral_max_output_tokens=_ephemeral_out,
         max_tokens_param_fn=agent._max_tokens_param,
         reasoning_config=agent.reasoning_config,
-        request_overrides=agent.request_overrides,
+        request_overrides=request_overrides,
         session_id=getattr(agent, "session_id", None),
         cache_scope_id=_cache_scope_id,
         model_lower=(agent.model or "").lower(),

@@ -1309,6 +1309,46 @@ VALID_REASONING_EFFORTS = (
 )
 
 
+SERVICE_TIER_DISABLED_VALUES = frozenset(
+    {"normal", "default", "standard", "off", "none"}
+)
+_SERVICE_TIER_ALIASES = {
+    "fast": "priority",
+    "on": "priority",
+    "priority": "priority",
+    "flex": "flex",
+}
+
+
+def parse_service_tier(value) -> str | None:
+    """Normalize a configured service tier to a supported wire value.
+
+    ``fast`` and ``on`` remain compatibility aliases for ``priority``.  The
+    OpenRouter ``flex`` tier is preserved as its own value.  Empty, normal,
+    and unrecognized values return ``None`` so callers can keep their current
+    default or report a configuration warning.
+    """
+    normalized = str(value or "").strip().lower()
+    if not normalized or normalized in SERVICE_TIER_DISABLED_VALUES:
+        return None
+    return _SERVICE_TIER_ALIASES.get(normalized)
+
+
+def strip_model_variant_suffix(model: str) -> str:
+    """Return the base slug for catalog and config matching.
+
+    A suffix such as ``:nitro`` is a model variant only when it follows a
+    vendor/model-style slug.  Bare colon-bearing identifiers remain untouched
+    so direct-provider model names and custom routing identifiers retain their
+    exact wire representation.
+    """
+    raw = str(model or "").strip()
+    stem, separator, suffix = raw.rpartition(":")
+    if separator and stem and suffix and "/" in stem and "/" not in suffix:
+        return stem
+    return raw
+
+
 def parse_reasoning_effort(effort) -> dict | None:
     """Parse a reasoning effort level into a config dict.
 
@@ -1357,9 +1397,10 @@ def _canonical_model_variants(model: str) -> list[str]:
     1. Exact input
     2. Dots/dashes cross-substitution on the entire string
     3. Version-dot recovery applied to ALL derivatives
-    4. Strip provider/aggregator prefix → bare model variants
-    5. Apply version-dot recovery to bare derivatives
-    6. Prepend known provider/aggregator prefixes
+    4. Variant-free slug fallback for ``vendor/model:variant`` inputs
+    5. Strip provider/aggregator prefix → bare model variants
+    6. Apply version-dot recovery to bare derivatives
+    7. Prepend known provider/aggregator prefixes
 
     Duplicates removed in insertion order (exact always wins).
     """
@@ -1392,6 +1433,12 @@ def _canonical_model_variants(model: str) -> list[str]:
 
     # 1-3. Base variants for the full string
     _add_with_derivatives(model)
+
+    # * A configured base slug applies to its provider-routed variants, but
+    # * exact variant-specific entries above keep precedence.
+    variant_base = strip_model_variant_suffix(model)
+    if variant_base != model:
+        _add_with_derivatives(variant_base)
 
     # Split by / to handle provider prefix
     parts = model.split('/')

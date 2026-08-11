@@ -1184,6 +1184,8 @@ DEFAULT_CONFIG = {
             "api_key": "",         # API key for base_url (falls back to OPENAI_API_KEY)
             "timeout": 120,        # seconds — LLM API call timeout; vision payloads need generous timeout
             "extra_body": {},      # OpenAI-compatible provider-specific request fields
+            "service_tier": "",   # * OpenRouter/OpenAI-compatible service tier: flex | priority
+            "providers": [],       # * Ordered OpenRouter upstream provider IDs for this task
             "reasoning_effort": "",  # per-task thinking level: none|minimal|low|medium|high|xhigh|max|ultra (empty = provider default)
             "download_timeout": 30,  # seconds — image HTTP download timeout; increase for slow connections
         },

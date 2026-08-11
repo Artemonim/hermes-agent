@@ -8830,18 +8830,17 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
         """Build the effective model/runtime config for a single turn.
 
-        Always uses the session's primary model/provider.  If `/fast` is
-        enabled and the model supports Priority Processing / Anthropic fast
-        mode, attach `request_overrides` so the API call is marked
-        accordingly.
+        Always uses the session's primary model/provider.  If a service tier
+        is configured, attach its model-aware request overrides so the API
+        call is marked accordingly.
 
         Per-provider ``request_overrides`` resolved by
         ``resolve_runtime_provider`` (e.g. a ``custom_providers`` ``extra_body``
         carrying ``chat_template_kwargs``) are preserved here and merged *under*
-        the fast-mode overrides, so a provider's configured request body still
+        the service-tier overrides, so a provider's configured request body still
         reaches the model on the gateway turn path.
         """
-        from hermes_cli.models import resolve_fast_mode_overrides
+        from hermes_cli.models import resolve_service_tier_overrides
 
         runtime = {
             "api_key": runtime_kwargs.get("api_key"),
@@ -8881,7 +8880,12 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return route
 
         try:
-            overrides = resolve_fast_mode_overrides(route["model"])
+            overrides = resolve_service_tier_overrides(
+                route["model"],
+                service_tier,
+                provider=runtime["provider"],
+                base_url=runtime["base_url"],
+            )
         except Exception:
             overrides = None
         # Fast-mode overrides (service_tier / speed) are top-level keys and do
@@ -10243,20 +10247,23 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
     @staticmethod
     def _load_service_tier() -> str | None:
-        """Load Priority Processing setting from config.yaml.
+        """Load the configured API service tier from config.yaml.
 
         Reads agent.service_tier from config.yaml. Accepted values mirror the CLI:
-        "fast"/"priority"/"on" => "priority", while "normal"/"off" disables it.
+        "fast"/"priority"/"on" => "priority" and "flex" => "flex", while
+        "normal"/"off" disables it.
         Returns None when unset or unsupported.
         """
         cfg = _load_gateway_runtime_config()
         raw = str(cfg_get(cfg, "agent", "service_tier", default="") or "").strip()
 
-        value = raw.lower()
-        if not value or value in {"normal", "default", "standard", "off", "none"}:
+        from hermes_constants import SERVICE_TIER_DISABLED_VALUES, parse_service_tier
+
+        parsed = parse_service_tier(raw)
+        if parsed is not None:
+            return parsed
+        if not raw or raw.lower() in SERVICE_TIER_DISABLED_VALUES:
             return None
-        if value in {"fast", "priority", "on"}:
-            return "priority"
         logger.warning("Unknown service_tier '%s', ignoring", raw)
         return None
 

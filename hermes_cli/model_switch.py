@@ -15,7 +15,7 @@ This module ties together the foundation layers:
 
 Provider switching uses the ``--provider`` flag exclusively.
 No colon-based ``provider:model`` syntax — colons are reserved for
-OpenRouter variant suffixes (``:free``, ``:extended``, ``:fast``).
+OpenRouter variant suffixes (``:free``, ``:extended``, ``:fast``, ``:nitro``).
 """
 
 from __future__ import annotations
@@ -1851,9 +1851,8 @@ def switch_model(
                     )
             elif not resolved_moa_preset:
                 # --- Step c: On aggregator, convert vendor:model to vendor/model ---
-                # Only convert when there's no slash — a slash means the name
-                # is already in vendor/model format and the colon is a variant
-                # tag (:free, :extended, :fast) that must be preserved.
+                # * Only convert when there is no slash. A vendor/model input
+                # * has a variant tag (:free, :extended, :fast, :nitro) to preserve.
                 colon_pos = raw_input.find(":")
                 if (
                     colon_pos > 0
@@ -1883,9 +1882,19 @@ def switch_model(
             catalog = list_provider_models(target_provider)
             if catalog:
                 new_model_lower = new_model.lower()
+                from hermes_constants import strip_model_variant_suffix
+
+                variant_base_lower = strip_model_variant_suffix(new_model).lower()
+                variant_base_bare_lower = variant_base_lower.rsplit("/", 1)[-1]
                 for mid in catalog:
                     if mid.lower() == new_model_lower:
                         new_model = mid
+                        resolved_in_current_catalog = True
+                        break
+                    if (
+                        variant_base_lower != new_model_lower
+                        and mid.lower() == variant_base_lower
+                    ):
                         resolved_in_current_catalog = True
                         break
                 else:
@@ -1894,6 +1903,12 @@ def switch_model(
                             _, bare = mid.split("/", 1)
                             if bare.lower() == new_model_lower:
                                 new_model = mid
+                                resolved_in_current_catalog = True
+                                break
+                            if (
+                                variant_base_lower != new_model_lower
+                                and bare.lower() == variant_base_bare_lower
+                            ):
                                 resolved_in_current_catalog = True
                                 break
 

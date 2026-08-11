@@ -23,9 +23,11 @@ from hermes_constants import (
     is_container,
     node_tool_runnable,
     parse_reasoning_effort,
+    parse_service_tier,
     reset_hermes_home_override,
     secure_parent_dir,
     set_hermes_home_override,
+    strip_model_variant_suffix,
     with_hermes_node_path,
 )
 
@@ -404,6 +406,25 @@ class TestParseReasoningEffort:
         assert documented.issubset(set(VALID_REASONING_EFFORTS))
 
 
+class TestServiceTierParsing:
+    def test_parses_flex_and_priority_aliases(self):
+        assert parse_service_tier("flex") == "flex"
+        assert parse_service_tier("priority") == "priority"
+        assert parse_service_tier("fast") == "priority"
+
+    def test_omits_disabled_and_unknown_values(self):
+        assert parse_service_tier("default") is None
+        assert parse_service_tier("not-a-tier") is None
+
+
+class TestModelVariantSuffixes:
+    def test_strips_only_vendor_model_variant_suffixes(self):
+        assert strip_model_variant_suffix(
+            "deepseek/deepseek-v4-flash-0731:nitro"
+        ) == "deepseek/deepseek-v4-flash-0731"
+        assert strip_model_variant_suffix("ollama:latest") == "ollama:latest"
+
+
 class TestResolvePerModelReasoningEffort:
     """Tests for resolve_per_model_reasoning_effort() — spelling-tolerant
     per-model override lookup from agent.reasoning_overrides dict.
@@ -449,6 +470,26 @@ class TestResolvePerModelReasoningEffort:
         overrides = {"claude-opus-4.5": "high", "claude-opus-4-5": "xhigh"}
         result = resolve_per_model_reasoning_effort("claude-opus-4.5", overrides)
         assert result == {"enabled": True, "effort": "high"}
+
+    def test_base_slug_applies_to_model_variant(self):
+        from hermes_constants import resolve_per_model_reasoning_effort
+
+        model = "deepseek/deepseek-v4-flash-0731:nitro"
+        assert resolve_per_model_reasoning_effort(
+            model, {"deepseek/deepseek-v4-flash-0731": "high"}
+        ) == {"enabled": True, "effort": "high"}
+
+    def test_variant_specific_override_wins_over_base_slug(self):
+        from hermes_constants import resolve_per_model_reasoning_effort
+
+        model = "deepseek/deepseek-v4-flash-0731:nitro"
+        assert resolve_per_model_reasoning_effort(
+            model,
+            {
+                "deepseek/deepseek-v4-flash-0731": "high",
+                model: "low",
+            },
+        ) == {"enabled": True, "effort": "low"}
 
 
 

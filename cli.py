@@ -402,12 +402,15 @@ def _parse_reasoning_config(effort) -> dict | None:
 
 
 def _parse_service_tier_config(raw: str) -> str | None:
-    """Parse a persisted service-tier preference into a Responses API value."""
+    """Parse a persisted service-tier preference into a wire value."""
+    from hermes_constants import SERVICE_TIER_DISABLED_VALUES, parse_service_tier
+
     value = str(raw or "").strip().lower()
-    if not value or value in {"normal", "default", "standard", "off", "none"}:
+    parsed = parse_service_tier(value)
+    if parsed is not None:
+        return parsed
+    if not value or value in SERVICE_TIER_DISABLED_VALUES:
         return None
-    if value in {"fast", "priority", "on"}:
-        return "priority"
     logger.warning("Unknown service_tier '%s', ignoring", raw)
     return None
 

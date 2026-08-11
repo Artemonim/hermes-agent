@@ -56,6 +56,25 @@ class TestParseModelInput:
         assert provider == "openrouter"
         assert model == "anthropic/claude-sonnet-4.5"
 
+    def test_openrouter_variant_suffix_is_preserved(self):
+        provider, model = parse_model_input(
+            "deepseek/deepseek-v4-flash-0731:nitro", "openrouter"
+        )
+        assert provider == "openrouter"
+        assert model == "deepseek/deepseek-v4-flash-0731:nitro"
+
+
+def test_openrouter_variant_validates_against_its_base_catalog_slug():
+    result = _validate(
+        "deepseek/deepseek-v4-flash-0731:nitro",
+        "openrouter",
+        api_models=["deepseek/deepseek-v4-flash-0731"],
+    )
+
+    assert result["accepted"] is True
+    assert result["recognized"] is True
+    assert result.get("corrected_model") is None
+
 
 # -- curated_models_for_provider ---------------------------------------------
 
@@ -593,8 +612,6 @@ class TestProbeApiModelsUserAgent:
         assert ua and ua.startswith("hermes-cli/")
         # No Authorization was set, but UA must still be present.
         assert req.get_header("Authorization") is None
-
-
 
 
 # -- validate — OpenRouter routing-variant suffixes (:nitro / :floor / ...) ----

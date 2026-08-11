@@ -3795,6 +3795,59 @@ def resolve_fast_mode_overrides(model_id: Optional[str]) -> dict[str, Any] | Non
     return {"service_tier": "priority"}
 
 
+def resolve_service_tier_overrides(
+    model_id: Optional[str],
+    service_tier: Optional[str],
+    *,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> dict[str, Any] | None:
+    """Return request overrides for a normalized service-tier preference.
+
+    OpenRouter accepts both ``flex`` and ``priority`` as top-level request
+    fields for every supported model. Elsewhere, ``priority`` retains the
+    existing model-aware /fast mapping: OpenAI models receive
+    ``service_tier`` while supported Anthropic models receive ``speed``.
+    """
+    from hermes_constants import parse_service_tier
+
+    tier = parse_service_tier(service_tier)
+    if tier == "flex":
+        return {"service_tier": "flex"}
+    if tier == "priority" and _is_openrouter_service_tier_route(
+        provider, base_url
+    ):
+        return {"service_tier": "priority"}
+    if tier == "priority":
+        return resolve_fast_mode_overrides(model_id)
+    return None
+
+
+def _is_openrouter_service_tier_route(
+    provider: Optional[str], base_url: Optional[str]
+) -> bool:
+    """Return whether a request route uses OpenRouter's service-tier API."""
+    provider_name = str(provider or "").strip()
+    if provider_name and normalize_provider(provider_name) == "openrouter":
+        return True
+    if not base_url:
+        return False
+    from utils import base_url_host_matches
+
+    return base_url_host_matches(base_url, "openrouter.ai")
+
+
+def _catalog_matches_requested_model(requested: str, catalog: list[str]) -> bool:
+    """Return whether a catalog contains a model or its provider variant base."""
+    catalog_set = set(catalog)
+    if requested in catalog_set:
+        return True
+    from hermes_constants import strip_model_variant_suffix
+
+    base = strip_model_variant_suffix(requested)
+    return base != requested and base in catalog_set
+
+
 def _resolve_copilot_catalog_api_key() -> str:
     """Best-effort GitHub token for fetching the Copilot model catalog.
 
@@ -6676,7 +6729,7 @@ def validate_requested_model(
                     f"Load `{requested}` in LM Studio (Developer tab → Load Model) and try again."
                 ),
             }
-        if requested_for_lookup in set(models):
+        if _catalog_matches_requested_model(requested_for_lookup, models):
             return {"accepted": True, "persist": True, "recognized": True, "message": None}
         return {
             "accepted": False, "persist": False, "recognized": False,
@@ -6784,7 +6837,7 @@ def validate_requested_model(
             )
         api_models = probe.get("models")
         if api_models is not None:
-            if requested_for_lookup in set(api_models):
+            if _catalog_matches_requested_model(requested_for_lookup, api_models):
                 return {
                     "accepted": True,
                     "persist": True,
@@ -6891,7 +6944,7 @@ def validate_requested_model(
                     ),
                 }
         if catalog_models:
-            if requested_for_lookup in set(catalog_models):
+            if _catalog_matches_requested_model(requested_for_lookup, catalog_models):
                 return {
                     "accepted": True,
                     "persist": True,
@@ -7012,7 +7065,7 @@ def validate_requested_model(
             api_key=api_key or None,
         )
         if anthropic_models is not None:
-            if requested_for_lookup in set(anthropic_models):
+            if _catalog_matches_requested_model(requested_for_lookup, anthropic_models):
                 return {
                     "accepted": True,
                     "persist": True,
@@ -7053,7 +7106,7 @@ def validate_requested_model(
     if api_mode == "anthropic_messages":
         api_models = fetch_api_models(api_key, base_url, api_mode=api_mode)
         if api_models is not None:
-            if requested_for_lookup in set(api_models):
+            if _catalog_matches_requested_model(requested_for_lookup, api_models):
                 return {
                     "accepted": True,
                     "persist": True,
@@ -7097,7 +7150,7 @@ def validate_requested_model(
                 m[len("models/"):] if isinstance(m, str) and m.startswith("models/") else m
                 for m in api_models
             ]
-        if requested_for_lookup in set(api_models):
+        if _catalog_matches_requested_model(requested_for_lookup, api_models):
             # API confirmed the model exists
             return {
                 "accepted": True,
@@ -7166,9 +7219,25 @@ def validate_requested_model(
                 from hermes_cli.providers import is_official_openai_host
 
                 _openai_listing_is_authoritative = is_official_openai_host(base_url)
-            if not _openai_listing_is_authoritative and _model_in_provider_catalog(
-                (_variant_base or requested_for_lookup).lower(),
-                _provider_keys(normalized),
+            from hermes_constants import strip_model_variant_suffix
+
+            catalog_lookup_model = strip_model_variant_suffix(requested_for_lookup)
+            catalog_model = (_variant_base or requested_for_lookup).lower()
+            if not _openai_listing_is_authoritative and (
+                _model_in_provider_catalog(
+                    catalog_model,
+                    _provider_keys(normalized),
+                )
+                or _model_in_provider_catalog(
+                    requested_for_lookup.lower(), _provider_keys(normalized)
+                )
+                or (
+                    catalog_lookup_model.lower() != catalog_model
+                    and catalog_lookup_model.lower() != requested_for_lookup.lower()
+                    and _model_in_provider_catalog(
+                        catalog_lookup_model.lower(), _provider_keys(normalized)
+                    )
+                )
             ):
                 return {
                     "accepted": True,

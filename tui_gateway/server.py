@@ -5956,16 +5956,10 @@ def _load_reasoning_config(model: str = "") -> dict | None:
 
 
 def _load_service_tier() -> str | None:
-    raw = (
-        str((_load_cfg().get("agent") or {}).get("service_tier", "") or "")
-        .strip()
-        .lower()
-    )
-    if not raw or raw in {"normal", "default", "standard", "off", "none"}:
-        return None
-    if raw in {"fast", "priority", "on"}:
-        return "priority"
-    return None
+    from hermes_constants import parse_service_tier
+
+    raw = (_load_cfg().get("agent") or {}).get("service_tier", "")
+    return parse_service_tier(raw)
 
 
 def _load_provider_routing() -> dict:

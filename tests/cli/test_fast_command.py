@@ -28,6 +28,7 @@ class TestParseServiceTierConfig(unittest.TestCase):
     def test_fast_maps_to_priority(self):
         self.assertEqual(self._parse("fast"), "priority")
         self.assertEqual(self._parse("priority"), "priority")
+        self.assertEqual(self._parse("flex"), "flex")
 
 
 
@@ -143,6 +144,16 @@ class TestPriorityProcessingModels(unittest.TestCase):
         result = resolve_fast_mode_overrides("gpt-4.1")
         assert result == {"service_tier": "priority"}
 
+    def test_resolve_service_tier_overrides_accepts_openrouter_tiers_without_fast_model_gate(self):
+        from hermes_cli.models import resolve_service_tier_overrides
+
+        assert resolve_service_tier_overrides(
+            "deepseek/deepseek-v4-flash-0731:nitro", "flex", provider="openrouter"
+        ) == {"service_tier": "flex"}
+        assert resolve_service_tier_overrides(
+            "deepseek/deepseek-v4-flash-0731:nitro", "priority", provider="openrouter"
+        ) == {"service_tier": "priority"}
+
 
 
 class TestFastModeRouting(unittest.TestCase):
@@ -176,7 +187,7 @@ class TestFastModeRouting(unittest.TestCase):
         # But request_overrides should be set
         assert route["request_overrides"] == {"service_tier": "priority"}
 
-    def test_turn_route_keeps_primary_runtime_when_model_has_no_fast_backend(self):
+    def test_turn_route_injects_openrouter_priority_without_fast_model_gate(self):
         cli_mod = _import_cli()
         stub = SimpleNamespace(
             model="gpt-5.3-codex",
@@ -193,7 +204,25 @@ class TestFastModeRouting(unittest.TestCase):
         route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
 
         assert route["runtime"]["provider"] == "openrouter"
-        assert route.get("request_overrides") is None
+        assert route["request_overrides"] == {"service_tier": "priority"}
+
+    def test_turn_route_injects_flex_for_openrouter_variant(self):
+        cli_mod = _import_cli()
+        stub = SimpleNamespace(
+            model="deepseek/deepseek-v4-flash-0731:nitro",
+            api_key="primary-key",
+            base_url="https://openrouter.ai/api/v1",
+            provider="openrouter",
+            api_mode="chat_completions",
+            acp_command=None,
+            acp_args=[],
+            _credential_pool=None,
+            service_tier="flex",
+        )
+
+        route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
+
+        assert route["request_overrides"] == {"service_tier": "flex"}
 
 
 class TestAnthropicFastMode(unittest.TestCase):

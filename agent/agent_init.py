@@ -51,7 +51,11 @@ from agent.tool_guardrails import (
 from hermes_cli.config import cfg_get
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.timeouts import get_provider_request_timeout
-from hermes_constants import get_hermes_home
+from hermes_constants import (
+    get_hermes_home,
+    parse_service_tier,
+    strip_model_variant_suffix,
+)
 from utils import base_url_host_matches, is_truthy_value
 
 # Use the same logger name as run_agent so tests patching ``run_agent.logger``
@@ -405,6 +409,7 @@ def _normalized_custom_base_url(value: Any) -> str:
 
 def _custom_provider_model_matches(agent_model: str, entry: Dict[str, Any]) -> bool:
     agent_model_norm = str(agent_model or "").strip().lower()
+    base_model_norm = strip_model_variant_suffix(agent_model_norm).lower()
     # Multi-model entries (v12+ `providers.<name>.models` mapping / legacy
     # `models:` list): the agent's model matching ANY catalog entry counts.
     # Without this, a provider whose `model`/`default_model` differs from the
@@ -423,7 +428,13 @@ def _custom_provider_model_matches(agent_model: str, entry: Dict[str, Any]) -> b
     provider_model = str(entry.get("model", "") or "").strip().lower()
     if not provider_model and not catalog:
         return True
-    return provider_model == agent_model_norm
+    if provider_model == agent_model_norm:
+        return True
+    if base_model_norm != agent_model_norm:
+        if catalog and base_model_norm in catalog:
+            return True
+        return provider_model == base_model_norm
+    return False
 
 
 def _custom_provider_extra_body_for_agent(
@@ -967,7 +978,7 @@ def init_agent(
     # Read once at init; switch_model / try_activate_fallback / restore
     # keep it in sync with the active provider.
     agent._reasoning_echo_flag = agent._read_reasoning_echo_from_config()
-    agent.service_tier = service_tier
+    agent.service_tier = parse_service_tier(service_tier)
     agent.request_overrides = dict(request_overrides or {})
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False

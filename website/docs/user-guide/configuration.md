@@ -140,6 +140,22 @@ Cursor-style SecretRef syntax is also accepted: `${env:VAR_NAME}` resolves exact
 
 For AI provider setup (OpenRouter, Anthropic, Copilot, custom endpoints, self-hosted LLMs, fallback models, etc.), see [AI Providers](/integrations/providers).
 
+### Service tier
+
+Set `agent.service_tier` to request an API processing tier for primary chat
+turns. `flex` and `priority` are sent as a top-level `service_tier` field on
+OpenRouter routes; `fast` remains a compatibility alias for `priority`.
+
+```yaml
+agent:
+  service_tier: flex       # flex | priority; empty or normal disables it
+```
+
+`/fast` continues to control the session's priority/fast-mode override. Use
+the configuration value when you want the OpenRouter `flex` tier by default.
+Auxiliary models have their own independent `service_tier` setting described
+under [Auxiliary Models](#auxiliary-models).
+
 ### Provider Timeouts
 
 You can set `providers.<id>.request_timeout_seconds` for a provider-wide request timeout, plus `providers.<id>.models.<model>.timeout_seconds` for a model-specific override. Applies to the primary turn client on every transport (OpenAI-wire, native Anthropic, Anthropic-compatible), the fallback chain, rebuilds after credential rotation, and (for OpenAI-wire) the per-request timeout kwarg — so the configured value wins over the legacy `HERMES_API_TIMEOUT` env var.
@@ -1324,6 +1340,8 @@ auxiliary:
     base_url: ""               # Custom OpenAI-compatible endpoint (overrides provider)
     api_key: ""                # API key for base_url (falls back to OPENAI_API_KEY)
     timeout: 120               # seconds — LLM API call timeout; vision payloads need generous timeout
+    service_tier: ""           # optional: "flex" or "priority" for compatible APIs
+    providers: []              # OpenRouter upstream provider IDs, tried in this order
     download_timeout: 30       # seconds — image HTTP download; increase for slow connections
     max_concurrency: 8         # max concurrent image encode/resize bursts across the process
                                # (default: host CPU core count, no ceiling) — bounds only the
@@ -1466,7 +1484,22 @@ The semaphore wraps the entire call including retries and fallbacks, so a single
 
 ### OpenRouter routing & Pareto Code for auxiliary tasks
 
-When an auxiliary task resolves to OpenRouter (either explicitly or via `provider: "main"` while your main agent is on OpenRouter), the main agent's `provider_routing` and `openrouter.min_coding_score` settings **do not propagate** — by design, each auxiliary task is independent. To set OpenRouter provider preferences or use the [Pareto Code router](/integrations/providers#openrouter-pareto-code-router) for a specific aux task, set them per-task via `extra_body`:
+When an auxiliary task resolves to OpenRouter (either explicitly or via `provider: "main"` while your main agent is on OpenRouter), the main agent's `provider_routing` and `openrouter.min_coding_score` settings **do not propagate** — by design, each auxiliary task is independent.
+
+For the common case, use the task-level `providers` list and `service_tier` field. Hermes turns `providers` into OpenRouter's top-level `provider.order` object only for an OpenRouter route; `service_tier` becomes the top-level request field on compatible OpenAI-style APIs:
+
+```yaml
+auxiliary:
+  vision:
+    provider: openrouter
+    model: google/gemini-3.5-flash-lite
+    reasoning_effort: medium
+    service_tier: flex
+    providers:
+      - google-ai-studio/flex
+```
+
+For the full OpenRouter routing object or Pareto Code router controls, use `extra_body`:
 
 ```yaml
 auxiliary:
@@ -1484,7 +1517,7 @@ auxiliary:
           min_coding_score: 0.5            # 0.0–1.0; higher = stronger coders
 ```
 
-The shape mirrors what OpenRouter accepts in the chat completions request body. Hermes forwards the entire `extra_body` verbatim, so any other OpenRouter request-body field documented at [openrouter.ai/docs](https://openrouter.ai/docs) works the same way.
+The shape mirrors what OpenRouter accepts in the chat completions request body. Hermes forwards the entire `extra_body` verbatim, so any other OpenRouter request-body field documented at [openrouter.ai/docs](https://openrouter.ai/docs) works the same way. An explicit `extra_body.provider.order` or `extra_body.service_tier` takes precedence over the convenience fields.
 
 ### Changing the Vision Model
 
