@@ -116,6 +116,35 @@ def _tick_step(obs: dict[str, Any]) -> int:
     return (day - 1) * 24 + hour
 
 
+def _openrouter_app_headers() -> dict[str, str]:
+    return {
+        "HTTP-Referer": (
+            os.environ.get("OPENROUTER_HTTP_REFERER")
+            or "https://github.com/Artemonim/merchantbench"
+        ),
+        "X-Title": os.environ.get("OPENROUTER_X_TITLE") or "MerchantBench",
+    }
+
+
+def _apply_openrouter_app_headers(agent: Any) -> None:
+    """Force OpenRouter dashboard App name to MerchantBench (not Hermes Agent)."""
+    headers = _openrouter_app_headers()
+    client_kwargs = getattr(agent, "_client_kwargs", None)
+    if isinstance(client_kwargs, dict):
+        merged = dict(client_kwargs.get("default_headers") or {})
+        merged.update(headers)
+        client_kwargs["default_headers"] = merged
+    # Also keep the live OpenAI client in sync when already constructed.
+    client = getattr(agent, "client", None) or getattr(agent, "_client", None)
+    if client is not None:
+        try:
+            default_headers = getattr(client, "default_headers", None)
+            if default_headers is not None and hasattr(default_headers, "update"):
+                default_headers.update(headers)
+        except Exception:
+            logger.debug("Could not update live client OpenRouter headers", exc_info=True)
+
+
 class MerchantBenchHermesRuntime:
     """ONE AIAgent + ONE conversation history across all decision windows."""
 
@@ -192,6 +221,7 @@ class MerchantBenchHermesRuntime:
             # Keep Hermes native tools; MerchantBench tools are an extra toolset.
             enabled_toolsets=None,
         )
+        _apply_openrouter_app_headers(self.agent)
         self.bridge.bind_agent(self.agent)
         # Ensure the merchantbench toolset stays visible even if defaults change.
         enabled = getattr(self.agent, "enabled_toolsets", None)
