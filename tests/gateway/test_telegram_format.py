@@ -306,6 +306,19 @@ class TestFormatMessageBlockquote:
         assert "\\|" in result
         assert "\\>" not in result
 
+    def test_expandable_blockquote_preserves_trailing_pipes(self, adapter):
+        """Single-line expandable quotes keep an unescaped || marker."""
+        result = adapter.format_message("**> hello||")
+        assert result == "**> hello||"
+        assert "\\|" not in result
+
+    def test_expandable_blockquote_multiline_preserves_trailing_pipes(self, adapter):
+        """Continuation lines after **> must keep the expandability mark."""
+        result = adapter.format_message("**> line1\n> line2\n> line3||")
+        assert result == "**> line1\n> line2\n> line3||"
+        assert "\\|" not in result
+        assert "\\>" not in result
+
 
 # =========================================================================
 # format_message - mixed/complex
