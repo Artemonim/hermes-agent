@@ -26,6 +26,53 @@ reviewing any change:
   high. Most new capability should arrive as a CLI command + skill, a
   service-gated tool, or a plugin — not as core surface.
 
+## Short Doctrine
+
+Collaboration invariants. Do not violate them even when a local change is
+otherwise correct. Mechanics live in the named sections.
+
+- **Protect the conversation prefix.** The registered stable prefix, toolset,
+  and persisted transcript stay byte-stable for the life of a session.
+  Preserve strict user/assistant/tool alternation. The in-loop rewrite is
+  context compression. Explicit user actions (`/model`, `/skills … --now`)
+  invalidate cache on purpose. Do not add silent cache breaks — provider
+  fallback and pool rotation already re-pay the prefix as a recovery cost,
+  not as a pattern to copy. See *Prompt Caching Must Not Break*.
+- **Keep the core waist narrow.** Every core model tool ships on every API
+  call. Grow capability at the edges: skills, CLI commands, service-gated
+  tools, plugins, MCP. See *The Footprint Ladder*.
+- **Extend before you invent.** Reuse registries, ABCs, hooks, and
+  orchestrators. A speculative hook with no concrete consumer is a
+  rejection. See *Contribution Rubric*.
+- **Verify before you fix.** Reproduce on current `main`, name the failing
+  line, and read original intent (`git log -p -S`) before treating a
+  limitation as a gap. See *Before you call it a bug*.
+- **Session scope is not process scope.** Client-surface tools, cwd, and
+  approvals resolve from the session. Process env, `check_fn` TTL caches,
+  and module globals serve many sessions. See *Surface capability is a
+  property of the SESSION*.
+- **`config.yaml` holds behavior; `.env` holds secrets.** Internal env
+  bridges are implementation, not a second user-facing schema. Gateway
+  treats YAML as authoritative for bridged keys; `load_cli_config()` is a
+  separate defaults dict — do not assume process env wins everywhere.
+  See *Adding Configuration*.
+- **Persistent state is profile-isolated.** Use `get_hermes_home()` and
+  `display_hermes_home()`; never hardcode `~/.hermes`. Profiles do not
+  live-inherit config (clone is copy-at-creation). Credential **read**
+  may fall back to the global-root `auth.json`; writes stay profile-local.
+  See *Profiles*.
+- **Tests assert invariants and real resolution chains.** No catalog
+  snapshots, no source-text greps. Exercise config, security, and resolver
+  paths with real imports against a temp `HERMES_HOME`. See *Testing*.
+- **New dependencies and outbound telemetry need extra justification.**
+  Upper-bound pins; no analytics without a user-facing opt-in. See
+  *Dependency Pinning Policy* and *What we don't want*.
+- **Preserve authorship of salvaged work.** Cherry-pick rather than
+  rewrite; credit the human contributor. See *Contribution Rubric*.
+- **Label fork-local rules.** Extra tooling in this checkout is not an
+  upstream Hermes contract. Canonical Python verification remains
+  `scripts/run_tests.sh`. See *Fork-local AE2*.
+
 ## Contribution Rubric — What We Want / What We Don't
 
 This is the project's intent layer. Use it two ways:
@@ -230,7 +277,7 @@ The pattern that works:
 
 - **The toolset is the surface gate.** Keep the tools off `_HERMES_CORE_TOOLS`
   (nobody else should pay their schema) and put them in a named toolset —
-  `desktop_ui`, `project`. The GUI gateway's `_load_enabled_toolsets(platform)`
+  `desktop_ui`, `project`. `tui_gateway.server._load_enabled_toolsets(platform)`
   folds that toolset in when the session's platform says GUI. One resolver,
   every topology.
 - **`check_fn` answers reachability or user opt-in, not surface.** "Is the
@@ -308,10 +355,104 @@ hermes-agent/
 └── tests/                # Pytest suite (~17k tests across ~900 files as of May 2026)
 ```
 
-**User config:** `~/.hermes/config.yaml` (settings), `~/.hermes/.env` (API keys only).
-**Logs:** `~/.hermes/logs/` — `agent.log` (INFO+), `errors.log` (WARNING+),
-`gateway.log` when running the gateway. Profile-aware via `get_hermes_home()`.
-Browse with `hermes logs [--follow] [--level ...] [--session ...]`.
+**User config:** `config.yaml` (behavior) and `.env` (secrets only) live under
+the active `HERMES_HOME` (`get_hermes_home()`). POSIX default is `~/.hermes`;
+Windows default is `%LOCALAPPDATA%\hermes`. See *Profiles* and *Adding
+Configuration*.
+**Logs:** `<HERMES_HOME>/logs/`. Browse with `hermes logs`. See *Operational
+logs*.
+
+## Documentation Map
+
+Canonical sources of truth — not a catalog of every Markdown file. Prefer
+indexes over per-platform, per-skill, or per-plugin pages. Generated skill
+docs, i18n copies, and runtime artifacts are out of this map.
+
+**Project intent and contribution** *(current)*
+- `AGENTS.md` — intent rubric, invariants, and this map. Read before any
+  core, prompt, tool, gateway, or test change.
+- `README.md` — product entry and install pointers.
+- `CONTRIBUTING.md` — human contributor setup, skill-vs-tool, PR process.
+  Authoritative over `website/docs/developer-guide/contributing.md`
+  (companion / abridged).
+- `SECURITY.md` — trust model and vulnerability-report scope (not the
+  operator how-to).
+- `.github/PULL_REQUEST_TEMPLATE.md` — PR checklist.
+
+**Architecture and runtime**
+- `website/docs/developer-guide/architecture.md` — internals overview
+  *(current)*.
+- `website/docs/developer-guide/codebase-ownership.md` — subsystem → source
+  dirs → specialist doc + test mirror *(specialist index)*. Leaves such as
+  agent-loop, gateway-internals, tools-runtime, and session-storage live
+  behind this index.
+- `website/docs/developer-guide/prompt-assembly.md` — cached vs volatile
+  prompt tiers *(specialist)*.
+- `website/docs/developer-guide/context-compression-and-caching.md` —
+  compression engines and prompt-cache mechanics *(specialist)*.
+- `docs/session-lifecycle.md` — gateway `SessionStore` lifecycle
+  *(specialist)*.
+- In-repo wire contracts *(specialist)*: `docs/observability/README.md`
+  (read-only observer hooks), `docs/middleware/README.md` (behavior-changing
+  wrappers), `docs/relay-connector-contract.md` (**EXPERIMENTAL**),
+  `docs/chronos-managed-cron-contract.md`.
+
+**Extension surfaces**
+- `website/docs/developer-guide/plugins/index.md` — routing table for every
+  pluggable interface *(current index)*.
+- `website/docs/developer-guide/creating-skills.md` — SKILL.md format
+  *(current; merge bar is the Skills HARDLINE in this file)*.
+- `website/docs/developer-guide/adding-tools.md` — built-in `tools/` +
+  `toolsets.py` *(current; last-resort core tools)*.
+- `website/docs/developer-guide/adding-platform-adapters.md` — messaging
+  adapters *(current)*. Companion: `gateway/platforms/ADDING_A_PLATFORM.md`.
+- `website/docs/developer-guide/model-provider-plugin.md` — inference
+  backend plugins *(specialist)*.
+- `website/docs/user-guide/messaging/index.md` — gateway + platform
+  comparison *(specialist index)*.
+
+**Configuration and security**
+- `website/docs/user-guide/configuration.md` — operator `config.yaml`
+  *(current)*.
+- `website/docs/reference/environment-variables.md` — env-var catalog;
+  `.env` is secrets only *(specialist)*.
+- `website/docs/user-guide/security.md` — operator hardening (approvals,
+  sandboxing). Different audience from `SECURITY.md` *(specialist)*.
+- `website/docs/reference/mcp-config-reference.md` — MCP YAML shape
+  *(specialist)*.
+
+**UI surfaces**
+- `apps/desktop/AGENTS.md` — desktop engineering invariants *(current)*.
+- `website/docs/user-guide/tui.md` — TUI launch and dashboard PTY embed
+  *(current)*.
+- `website/docs/reference/slash-commands.md` — slash surface driven by
+  `COMMAND_REGISTRY` *(specialist)*.
+- `website/docs/reference/cli-commands.md` — `hermes` CLI family
+  *(specialist)*.
+
+**Historical / fork-local**
+- `docs/design/profile-builder.md` — dashboard profile-builder **proposal,
+  not implemented** *(historical)*.
+- Fork-local AE2 lives in *Testing → Fork-local AE2* (`run.ps1`). There is
+  no standalone AE2 doc. Do not present it as upstream.
+
+**Maintenance**
+- A new canonical document (source of truth, class index, or explicitly
+  historical) must be added to this map in the same change. Planning
+  scratch files need not.
+- Historical or experimental docs stay in-tree only if labeled here.
+- Two sources of truth: pick one current row; the other becomes a
+  companion with an explicit pointer (example: `CONTRIBUTING.md` vs
+  `website/docs/developer-guide/contributing.md`). Complementary docs
+  with different audiences stay both current (`SECURITY.md` vs
+  `website/docs/user-guide/security.md`). Do **not** patch upstream
+  website copies to add that pointer — this map is the hierarchy, and
+  website files churn on the weekly `main` merge.
+- Do not map generated catalogs (`website/docs/user-guide/skills/**`,
+  `website/docs/reference/skills-catalog.md`), i18n copies, or runtime
+  artifacts.
+- This tree (*Project Structure*) lists directories. This map lists which
+  document is authoritative when the tree is not enough.
 
 ## TypeScript Style
 
@@ -347,6 +488,68 @@ model_tools.py  (imports tools/registry + triggers tool discovery)
        ↑
 run_agent.py, cli.py, batch_runner.py, environments/
 ```
+
+## Domain Contracts
+
+Cross-cutting invariants: one source of truth, several consumers, easy to
+break with a locally plausible change. Cards pointer-compress the named
+sections — they do not replace them.
+
+**Conversation cache, roles, and context mutation** — *Prompt Caching Must Not Break*
+- **SoT:** `agent.prompt_cache_boundary.register_stable_prefix`; wire markers in `agent.prompt_caching`; role repair `agent.agent_runtime_helpers.repair_message_sequence`. Tiers: `agent.system_prompt` stable → context → volatile (see `website/docs/developer-guide/prompt-assembly.md`).
+- **Consumers:** `AIAgent.run_conversation`, CLI/TUI/gateway/ACP restore, cron/review forks, cache-aware slash (`--now`), `/model`.
+- **Invariants:** The registered stable prefix, toolset, and past messages stay byte-stable for the session. No consecutive same-role messages; no synthetic user turn mid-loop. In-loop rewrite is compression only. `/model` and `--now` are explicit user invalidations. Volatile-tier / HUD content belongs after the prefix or on the user turn — do not rebuild the prefix to inject it.
+- **Extend / don't:** Put changing content after the stable prefix; defer prompt-state slash changes (`--now` to invalidate). Do not treat provider fallback or pool rotation as a license to add new silent cache breaks.
+- **Verify:** `tests/agent/test_prompt_cache_boundary.py`, `tests/agent/test_prompt_caching.py`, `tests/run_agent/test_message_sequence_repair.py`, `tests/hermes_cli/test_skills_skip_confirm.py`.
+
+**Session capability versus process availability** — *Surface capability is a property of the SESSION*
+- **SoT:** Session `source` via `tui_gateway.server._gui_surface_toolsets` / `_load_enabled_toolsets`. Named toolsets `desktop_ui`, `project`. `HERMES_DESKTOP` means this backend was spawned by the app, not "a GUI is watching".
+- **Consumers:** Desktop (local/SSH/URL/cloud), embedded `hermes --tui` against the same backend, messaging/CLI toolsets.
+- **Invariants:** GUI-only tools stay off `_HERMES_CORE_TOOLS`. A `source: desktop` session gets `desktop_ui` with `HERMES_DESKTOP` unset. Env alone must not grant them to TUI. `check_fn` is reachability/opt-in and process-TTL-cached — never a per-session surface gate.
+- **Extend / don't:** Add the tool to a named toolset and fold it from session source. Do not gate schema on `os.environ["HERMES_DESKTOP"]`.
+- **Verify:** `tests/tui_gateway/test_gui_surface_toolsets.py` (`test_desktop_session_gets_them_with_no_desktop_env`, `test_desktop_env_alone_does_not_grant_them`).
+
+**Tool registry → toolset → platform exposure** — *Toolsets*, *The Footprint Ladder*
+- **SoT:** `tools.registry.registry.register` + `toolsets.TOOLSETS` / `_HERMES_CORE_TOOLS`. Exposure: `model_tools.get_tool_definitions`. Auto-discovery imports `tools/*.py`; it does not expose the tool.
+- **Consumers:** Every agent (CLI, gateway platforms, TUI, cron, subagents).
+- **Invariants:** Visible iff in an enabled toolset and `check_fn` passes. Cross-tool schema mentions belong in `get_tool_definitions` post-process. `_last_resolved_tool_names` is process-global (`delegate_tool._run_single_child` save/restore).
+- **Extend / don't:** Footprint ladder, then register **and** add the name to a toolset. Do not stuff niche or session-local tools into `_HERMES_CORE_TOOLS`.
+- **Verify:** `tests/test_toolsets.py`, `tests/test_get_tool_definitions_cache_isolation.py`, `tests/tools/test_registry.py`.
+
+**Config loaders, secrets, and env bridges** — *Adding Configuration*
+- **SoT:** `hermes_cli.config_defaults.DEFAULT_CONFIG` and `OPTIONAL_ENV_VARS` (re-exported from `hermes_cli.config`). User files: `config.yaml` vs `.env`.
+- **Consumers:** `cli.load_cli_config` (separate defaults dict), `hermes_cli.config.load_config`, gateway `_load_gateway_config` (YAML plus managed-scope overlay and config→env bridge).
+- **Invariants:** `.env` is credentials only. Behavioral keys live in `config.yaml` and must land in `DEFAULT_CONFIG` or a loader will miss them. Gateway config→env bridge treats YAML as authoritative for bridged `agent.*` / `display.*` keys (overwrites stale `.env`). `load_cli_config()` is a separate defaults dict — do not assume process env wins on every surface.
+- **Extend / don't:** Add the key under the right `DEFAULT_CONFIG` section; bridge an internal env var in code if a child needs one; touch every loader that reads the key. Do not document a new user-facing `HERMES_*` for behavior, and do not "fix" CLI/gateway disagreement by inventing a fourth schema.
+- **Verify:** `tests/gateway/test_config_env_bridge_authority.py`, `tests/gateway/test_config_cwd_bridge.py`, `tests/hermes_cli/test_deprecated_cwd_warning.py`.
+
+**Profile-scoped persistent state** — *Profiles*
+- **SoT:** `hermes_cli.main._apply_profile_override` → `hermes_constants.get_hermes_home` / `display_hermes_home`. Listing: `hermes_cli.profiles._get_profiles_root` via `get_default_hermes_root()` (not the active `HERMES_HOME`).
+- **Consumers:** config, sessions, skills, memory, cron, logs, gateway token locks.
+- **Invariants:** Persistent paths use `get_hermes_home()`, never `Path.home() / ".hermes"`. Windows default is `%LOCALAPPDATA%\hermes`. Profiles are config islands (no live YAML inheritance). Credential **read** may fall back to the global-root `auth.json` when the profile has no provider entries; **writes** stay profile-local (`#18594`). Tests that mock `Path.home()` must also set `HERMES_HOME`.
+- **Extend / don't:** New state under `get_hermes_home() / …`. Adapters: `acquire_scoped_lock` on unique credentials. Do not read another profile's `config.yaml` at runtime to inherit defaults. Do not treat the `auth.json` read-fallback as permission to share other state.
+- **Verify:** `tests/hermes_cli/test_profiles.py` (`profile_env`), `tests/hermes_cli/test_auth_profile_fallback.py`, `tests/conftest.py` `_isolate_hermes_home`.
+
+**Slash-command registry and busy-session bypass** — *Slash Command Registry*, Known Pitfalls
+- **SoT:** `hermes_cli.commands.COMMAND_REGISTRY` / `CommandDef` (`busy_policy`, `busy_handler`). Guard 1: `should_bypass_active_session`. Guard 2: `GatewayRunner._dispatch_busy_slash_command`. Desktop: `apps/desktop/src/lib/desktop-slash-commands.ts`. `execute` is idle shared output (`hermes_cli.slash_exec.EXECUTORS`), not Guard 2.
+- **Consumers:** CLI dispatch/help/autocomplete, gateway help, Telegram BotCommand, Slack `/hermes` map, Desktop palette.
+- **Invariants:** Any resolvable slash bypasses Guard 1 automatically. Mid-run dispatch requires `busy_policy` plus a Guard-2 slot (`busy_handler` or the `plain` table). Desktop hides terminal/messaging noise but must still suggest and run skill/quick commands.
+- **Extend / don't:** Add `CommandDef` with the right `busy_policy`; CLI handler; gateway idle handler; for mid-run `dispatch`, add `busy_handler` or a `plain` table entry. Do not hardcode bypass lists, use `_process_message_background` for mid-run commands, or drop non-built-ins from the Desktop allow-list.
+- **Verify:** `tests/hermes_cli/test_commands.py`, `tests/gateway/test_command_bypass_active_session.py`, `tests/gateway/test_approve_deny_commands.py`, `apps/desktop/src/lib/desktop-slash-commands.test.ts`.
+
+**Plugin and provider boundaries** — *Plugins*
+- **SoT:** Plugin `register(ctx)` loaded by `hermes_cli.plugins.PluginManager`; memory `agent.memory_provider.MemoryProvider`; model providers `providers.register_provider` / `_discover_providers` (user overrides bundled). `discover_plugins()` is a side effect of importing `model_tools`.
+- **Consumers:** tool/lifecycle hooks, `hermes <plugin>` CLI, gateway platform plugins.
+- **Invariants:** Plugins do not patch `run_agent.py` / `cli.py` / `gateway/run.py` / `hermes_cli/main.py`. New memory backends and third-party product plugins ship standalone. Memory CLI is exposed only for the active provider.
+- **Extend / don't:** Implement the ABC / `register(ctx)`; if that cannot express the need, widen the generic hook/ctx surface. Do not add plugin-named branches in core argparse or import a model-provider plugin through `PluginManager`.
+- **Verify:** `tests/providers/test_plugin_discovery.py`, `tests/hermes_cli/test_plugins.py`.
+
+**Background durability** — *Delegation*, *Cron*, *Background Process Notifications*
+- **SoT:** Process-local async — `tools.delegate_tool` / `tools.async_delegation` + `process_registry.completion_queue`. Durable schedule — `cron.jobs` + `cron.scheduler`. OS process that can outlive a turn — `terminal(background=True, notify_on_complete=True)`.
+- **Consumers:** Parent agent loop, gateway watcher, cron tick, messaging delivery.
+- **Invariants:** Background `delegate_task` does not survive process restart. Cron sessions use `skip_memory=True`. Cron→live-session mirroring is **default OFF** (opt-in `cron.mirror_delivery` / per-job `attach_to_session`). Stateless/API channels cannot rely on notify watchers.
+- **Extend / don't:** Restart survival → `cronjob` or background terminal + notify. Parallel worker this process → `delegate_task(background=true)`. Do not enable memory on a cron job to "keep context".
+- **Verify:** `tests/gateway/test_async_delivery_capability.py`, `tests/tools/test_notify_on_complete.py`, `tests/cron/test_scheduler.py` (`test_run_job_disables_memory_even_when_per_job_enables_it`, `TestCronDeliveryMirror`), `tests/gateway/test_background_process_notifications.py`.
 
 ---
 
@@ -443,11 +646,15 @@ CommandDef("mycommand", "Description of what it does", "Session",
 elif canonical == "mycommand":
     self._handle_mycommand(cmd_original)
 ```
-3. If the command is available in the gateway, add a handler in `gateway/run.py`:
+3. If the command is available in the gateway, set `busy_policy` on the
+   `CommandDef` and add a handler in `gateway/run.py`:
 ```python
 if canonical == "mycommand":
     return await self._handle_mycommand(event)
 ```
+   Mid-run `dispatch` also needs a Guard-2 slot (`busy_handler` or the
+   `plain` table in `_dispatch_busy_slash_command`). `execute` is idle
+   shared output — it does not run Guard 2.
 4. For persistent settings, use `save_config_value()` in `cli.py`
 
 **CommandDef fields:**
@@ -459,6 +666,9 @@ if canonical == "mycommand":
 - `cli_only` — only available in the interactive CLI
 - `gateway_only` — only available in messaging platforms
 - `gateway_config_gate` — config dotpath (e.g. `"display.tool_progress_command"`); when set on a `cli_only` command, the command becomes available in the gateway if the config value is truthy. `GATEWAY_KNOWN_COMMANDS` always includes config-gated commands so the gateway can dispatch them; help/menus only show them when the gate is open.
+- `busy_policy` — mid-run gateway behavior: `"dispatch"`, `"reject"` (default), or `"interrupt_then_dispatch"`. Drives Guard 2 (`gateway/run.py:_dispatch_busy_slash_command`).
+- `busy_handler` — optional key of a special mid-run handler in the Guard-2 table.
+- `execute` — optional key in `hermes_cli.slash_exec.EXECUTORS` for shared informational output.
 
 **Adding an alias** requires only adding it to the `aliases` tuple on the existing `CommandDef`. No other file changes needed — dispatch, help text, Telegram menu, Slack mapping, and autocomplete all update automatically.
 
@@ -621,7 +831,8 @@ Reference: #2810 (bounds pass), #9801 (SHA pinning + audit CI).
 ## Adding Configuration
 
 ### config.yaml options:
-1. Add to `DEFAULT_CONFIG` in `hermes_cli/config.py`
+1. Add to `DEFAULT_CONFIG` in `hermes_cli/config_defaults.py` (re-exported
+   from `hermes_cli/config.py`)
 2. Bump `_config_version` (check the current value at the top of `DEFAULT_CONFIG`)
    ONLY if you need to actively migrate/transform existing user config
    (renaming keys, changing structure). Adding a new key to an existing
@@ -645,7 +856,8 @@ its own provider/model/base_url/max_tokens/reasoning_effort. See
 `archive_after_days`, `backup` (nested).
 
 ### .env variables (SECRETS ONLY — API keys, tokens, passwords):
-1. Add to `OPTIONAL_ENV_VARS` in `hermes_cli/config.py` with metadata:
+1. Add to `OPTIONAL_ENV_VARS` in `hermes_cli/config_defaults.py` (re-exported
+   from `hermes_cli/config.py`) with metadata:
 ```python
 "NEW_API_KEY": {
     "description": "What it's for",
@@ -667,10 +879,13 @@ the env var in code (see `gateway_timeout`, `terminal.cwd` → `TERMINAL_CWD`).
 |--------|---------|----------|
 | `load_cli_config()` | CLI mode | `cli.py` — merges CLI-specific defaults + user YAML |
 | `load_config()` | `hermes tools`, `hermes setup`, most CLI subcommands | `hermes_cli/config.py` — merges `DEFAULT_CONFIG` + user YAML |
-| Direct YAML load | Gateway runtime | `gateway/run.py` + `gateway/config.py` — reads user YAML raw |
+| Gateway YAML + overlay | Gateway runtime | `gateway/run.py` + `gateway/config.py` — user YAML plus managed-scope overlay and config→env bridge |
 
 If you add a new key and the CLI sees it but the gateway doesn't (or vice
 versa), you're on the wrong loader. Check `DEFAULT_CONFIG` coverage.
+User-facing behavior SoT is `config.yaml`. The gateway bridge overwrites
+stale `.env` values for bridged keys; do not assume `load_cli_config()`
+env-precedence is the rule on every surface.
 
 ### Working directory:
 - **CLI** — uses the process's current directory (`os.getcwd()`).
@@ -1118,9 +1333,10 @@ Hardening invariants:
 - Cron sessions pass `skip_memory=True` by default; memory providers
   intentionally do not run during cron.
 
-Cron deliveries are **not** mirrored into the target gateway session —
-they land in their own cron session with a header/footer frame so the
-main conversation's message-role alternation stays intact.
+Cron deliveries are **not** mirrored into the target gateway session by
+default — they land in their own cron session with a header/footer frame
+so the main conversation's message-role alternation stays intact. Opt-in
+mirroring exists (`cron.mirror_delivery` / per-job `attach_to_session`).
 
 ---
 
@@ -1176,12 +1392,23 @@ Hermes-Agent ensures caching remains valid throughout a conversation. **Do NOT i
 - Change toolsets mid-conversation
 - Reload memories or rebuild system prompts mid-conversation
 
-Cache-breaking forces dramatically higher costs. The ONLY time we alter context is during context compression.
+Cache-breaking forces dramatically higher costs. Do not silently rewrite
+the cached prefix. The in-loop rewrite is context compression. Explicit
+user actions that change model or prompt-state (`/model`, `/skills … --now`)
+invalidate cache on purpose. Provider fallback and credential-pool rotation
+also re-pay the prefix — that is a recovery cost, not a pattern to copy.
 
 Slash commands that mutate system-prompt state (skills, tools, memory, etc.)
 must be **cache-aware**: default to deferred invalidation (change takes
 effect next session), with an opt-in `--now` flag for immediate
 invalidation. See `/skills install --now` for the canonical pattern.
+
+The registered stable prefix must remain byte-identical for the life of
+the conversation. Volatile-tier snapshots and HUD notes belong after that
+prefix or on the user turn — see `website/docs/developer-guide/prompt-assembly.md`.
+
+Cross-surface card: *Domain Contracts → Conversation cache, roles, and
+context mutation*.
 
 ### Background Process Notifications (Gateway)
 
@@ -1220,7 +1447,9 @@ automatically scope to the active profile.
    ```
 
 2. **Use `display_hermes_home()` for user-facing messages.** Import from `hermes_constants`.
-   This returns `~/.hermes` for default or `~/.hermes/profiles/<name>` for profiles.
+   This returns `~/.hermes` on POSIX default, `~/AppData/Local/hermes` on the
+   Windows default (`%LOCALAPPDATA%\hermes`), or `~/.hermes/profiles/<name>`
+   for named profiles (POSIX). The string is shorthand — not a PowerShell path.
    ```python
    # GOOD
    from hermes_constants import display_hermes_home
@@ -1248,10 +1477,84 @@ automatically scope to the active profile.
    `disconnect()`/`stop()`. This prevents two profiles from using the same credential.
    See `plugins/platforms/irc/adapter.py` for the canonical pattern.
 
-6. **Profile operations are HOME-anchored, not HERMES_HOME-anchored** — `_get_profiles_root()`
-   returns `Path.home() / ".hermes" / "profiles"`, NOT `get_hermes_home() / "profiles"`.
-   This is intentional — it lets `hermes -p coder profile list` see all profiles regardless
-   of which one is active.
+6. **Profile operations are HOME-anchored, not HERMES_HOME-anchored** —
+   `_get_profiles_root()` returns `get_default_hermes_root() / "profiles"`,
+   NOT `get_hermes_home() / "profiles"`. That root is the platform-native
+   home (`~/.hermes` on POSIX, `%LOCALAPPDATA%\hermes` on Windows), or the
+   custom/Docker volume when `HERMES_HOME` points outside it. This is
+   intentional — it lets `hermes -p coder profile list` see all profiles
+   regardless of which one is active.
+
+7. **Credential read-fallback is not config inheritance.** When a named
+   profile has no provider entries, `get_provider_auth_state()` /
+   credential-pool **reads** may fall back to the global-root `auth.json`
+   (`#18594`). Writes stay in the profile. Do not extend this pattern to
+   `config.yaml`, skills, sessions, or memory.
+
+## Operational logs
+
+Logs for the active profile live under `<HERMES_HOME>/logs/`
+(`setup_logging()` in `hermes_logging.py`, `get_hermes_home()`).
+`display_hermes_home()` is a `~/…` print string, not a PowerShell path.
+Windows CLI default: `%LOCALAPPDATA%\hermes`. POSIX default: `~/.hermes`.
+`hermes -p <name>` re-homes to `<root>/profiles/<name>` before logging.
+
+**Files.** Always-on: `agent.log` (INFO+, catch-all), `errors.log`
+(WARNING+). Process-gated: `gateway.log` (`hermes gateway`); `gui.log`
+(`hermes dashboard|serve|gui|desktop`); `desktop.log` (Electron main, at
+the **Desktop root** home — a `--profile` backend logs under
+`profiles/<name>/`); `mcp-stderr.log` (`hermes logs mcp`);
+`tui_gateway_crash.log` (TUI panic; no alias, use `hermes logs list`).
+
+**Surfaces.** CLI → agent/errors. Messaging gateway is a separate process
+(`gateway.log`). Dashboard/`serve` = uvicorn + in-process `tui_gateway`
+(`gui.log`). Embedded dashboard TUI is a `hermes --tui` child (CLI-mode
+logging). Desktop = Electron (`desktop.log`) + child `serve` (`gui.log`).
+Standalone `hermes --tui` is CLI-mode; the TUI child has no file logging
+until the first `AIAgent`. ACP clears file handlers and logs to stderr.
+
+```text
+hermes logs
+hermes logs -f
+hermes logs errors|gateway|gui|desktop|mcp
+hermes logs list
+hermes logs --level WARNING --session <id> --component tools --since 1h
+hermes -p <name> logs errors
+```
+
+`--component`: `gateway`, `agent`, `tools`, `cli`, `cron`, `gui`.
+`--since`: `30m` / `1h` / `2d`. Ctrl+C stops `-f`. Direct read:
+
+```powershell
+Get-Content "$env:LOCALAPPDATA\hermes\logs\errors.log" -Tail 50 -Wait
+```
+
+If both `%LOCALAPPDATA%\hermes` and `%USERPROFILE%\.hermes` exist, check
+both (Desktop may still prefer the legacy tree when the native home was
+never created).
+
+| Symptom | First source | Next |
+|---|---|---|
+| Hermes does not start | stderr; Desktop → `desktop.log`; TUI → crash log | `hermes logs errors` in the **same** home |
+| Model/provider error | `errors.log` | `agent.log --session`; optional `sessions/request_dump_*.json` |
+| Tool call failed | `hermes logs --component tools --session <id>` | `errors.log`; MCP → `hermes logs mcp` |
+| Gateway got a message, no reply | `gateway.log` | `agent.log --session`; confirm `hermes gateway` is running |
+| Desktop/TUI cannot connect | `desktop.log` or crash log | profile `gui.log` / `agent.log` (Electron log stays at root) |
+| Background process, no notify | `gateway.log` | `display.background_process_notifications` (`all\|result\|error\|off`) |
+| Error only in one profile | `hermes -p <name> logs errors` | compare `hermes logs list` display path |
+| One session/conversation | `hermes logs --session <id>` | canonical transcript is `state.db`, not `{session}.jsonl` |
+
+**Not aliases.** `state.db` (sessions). Subagent live:
+`<HERMES_HOME>/cache/delegation/live/<id>/task-<n>.log`. Timeout dumps:
+`subagent-timeout-*.log`. Docker s6: `logs/gateways/<profile>/current`
+and `docker logs`. Trajectories: CWD JSONL, not `HERMES_HOME`. Background
+`terminal` output is in-memory unless sandboxed (`hermes_bg_<id>.log`).
+
+**Security.** Handlers use `RedactingFormatter`; still treat logs as
+sensitive. Do not paste `.env`, `auth.json`, tokens, or API keys. Do not
+commit runtime logs. Prefer `hermes debug share` for redacted bundles.
+Absence in one file is not absence: check every process sink for that
+surface.
 
 ## Known Pitfalls
 
@@ -1280,12 +1583,14 @@ Tool schema descriptions must not mention tools from other toolsets by name (e.g
 When an agent is running, messages pass through two sequential guards:
 (1) **base adapter** (`gateway/platforms/base.py`) queues messages in
 `_pending_messages` when `session_key in self._active_sessions`, and
-(2) **gateway runner** (`gateway/run.py`) intercepts `/stop`, `/new`,
-`/queue`, `/status`, `/approve`, `/deny` before they reach
-`running_agent.interrupt()`. Any new command that must reach the runner
-while the agent is blocked (e.g. approval prompts) MUST bypass BOTH
-guards and be dispatched inline, not via `_process_message_background()`
-(which races session lifecycle).
+(2) **gateway runner** Guard 2 (`gateway/run.py:_dispatch_busy_slash_command`)
+dispatches from `CommandDef.busy_policy` / `busy_handler`.
+`should_bypass_active_session()` is **any resolvable slash** — not a
+hardcoded six-command list — so Guard 1 is automatic for registry
+commands. Mid-run dispatch still needs `busy_policy` plus a Guard-2 slot
+(`busy_handler` or the `plain` table). Do not send mid-run commands
+through `_process_message_background()` (which races session lifecycle).
+See *Domain Contracts → Slash-command registry and busy-session bypass*.
 
 ### Squash merges from stale branches silently revert recent fixes
 Before squash-merging a PR, ensure the branch is up to date with `main`
@@ -1342,6 +1647,9 @@ scripts/run_tests.sh -v --tb=long                     # pass-through pytest flag
 the full local pipeline. It never replaces task-specific verification through
 `scripts/run_tests.sh`; the fast profile intentionally runs only changed Python
 test files and does not infer tests from production-source changes.
+
+Keep this subsection as the **only** AE2 recipe in this file so weekly
+`main` → `dev` merges of `AGENTS.md` stay localized here.
 
 **Flake policy:** the runner auto-retries a failing test FILE once in a fresh
 subprocess (`--file-retries`, default 1; `HERMES_TEST_FILE_RETRIES=0` to
