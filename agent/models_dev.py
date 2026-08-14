@@ -577,6 +577,7 @@ class ModelCapabilities:
     context_window: int = 200000
     max_output_tokens: int = 8192
     model_family: str = ""
+    supports_audio: bool = False
 
 
 def _get_provider_models(provider: str) -> Optional[Dict[str, Any]]:
@@ -650,8 +651,10 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
         input_mods = None
     if isinstance(input_mods, list):
         supports_vision = "image" in input_mods
+        supports_audio = "audio" in input_mods
     else:
         supports_vision = bool(entry.get("attachment", False))
+        supports_audio = False
     supports_reasoning = bool(entry.get("reasoning", False))
 
     # Extract limits
@@ -674,6 +677,7 @@ def get_model_capabilities(provider: str, model: str) -> Optional[ModelCapabilit
         context_window=context_window,
         max_output_tokens=max_output_tokens,
         model_family=model_family,
+        supports_audio=supports_audio,
     )
 
 

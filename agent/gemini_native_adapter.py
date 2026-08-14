@@ -273,6 +273,15 @@ def _extract_multimodal_parts(content: Any) -> List[Dict[str, Any]]:
                     }
                 }
             )
+        elif ptype in {"input_audio", "audio"}:
+            try:
+                from agent.audio_routing import gemini_inline_audio_from_part
+
+                audio_part = gemini_inline_audio_from_part(item)
+            except Exception:
+                audio_part = None
+            if audio_part:
+                parts.append(audio_part)
     return parts
 
 

@@ -1838,6 +1838,10 @@ def _convert_content_part_to_anthropic(part: Any) -> Optional[Dict[str, Any]]:
         image_value = part.get("image_url", {})
         url = image_value.get("url", "") if isinstance(image_value, dict) else str(image_value or "")
         block = {"type": "image", "source": _image_source_from_openai_url(url)}
+    elif ptype in {"input_audio", "audio"}:
+        # Anthropic Messages does not accept native audio parts. Keep a
+        # text marker so the turn is not silently empty.
+        block = {"type": "text", "text": "[audio]"}
     else:
         block = dict(part)
 

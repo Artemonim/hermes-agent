@@ -177,18 +177,20 @@ def _coerce_capability_bool(raw: Any) -> Optional[bool]:
     return None
 
 
-def _supports_vision_override(
+def _supports_capability_override(
     cfg: Optional[Dict[str, Any]],
     provider: str,
     model: str,
     *,
+    primary_key: str,
+    alias_key: str,
     requested_provider: str = "",
 ) -> Optional[bool]:
-    """Resolve user-declared vision capability from config.yaml.
+    """Resolve a user-declared per-model capability flag from config.yaml.
 
     Resolution order, first hit wins:
-      1. ``model.supports_vision`` (top-level shortcut for the active model)
-      2. ``providers.<provider>.models.<model>.supports_vision``
+      1. ``model.<primary_key>`` (top-level shortcut for the active model)
+      2. ``providers.<provider>.models.<model>.<primary_key>``
          (named custom providers — ``provider`` may be the runtime-resolved
          value ``"custom"``, the runtime's originally requested provider,
          and/or the user-declared name under ``model.provider``; all are
@@ -197,7 +199,7 @@ def _supports_vision_override(
       2b. ``custom_providers`` (legacy list form) ``.models.<model>``
 
     Under (2) and (2b), the per-model capability key may be written as
-    either ``supports_vision`` or the shorter ``vision`` alias; both work.
+    either ``primary_key`` or ``alias_key``; both work.
 
     Returns None when no override is set, so the caller falls through to
     models.dev. Returns False explicitly only when the user wrote a
@@ -209,7 +211,7 @@ def _supports_vision_override(
     # 1. Top-level shortcut
     model_cfg_raw = cfg.get("model")
     model_cfg: Dict[str, Any] = model_cfg_raw if isinstance(model_cfg_raw, dict) else {}
-    top = _coerce_capability_bool(model_cfg.get("supports_vision"))
+    top = _coerce_capability_bool(model_cfg.get(primary_key))
     if top is not None:
         return top
 
@@ -239,7 +241,7 @@ def _supports_vision_override(
         per_model_raw = models_cfg.get(model)
         per_model: Dict[str, Any] = per_model_raw if isinstance(per_model_raw, dict) else {}
         coerced = _coerce_capability_bool(
-            per_model.get("supports_vision", per_model.get("vision"))
+            per_model.get(primary_key, per_model.get(alias_key))
         )
         if coerced is not None:
             return coerced
@@ -265,12 +267,30 @@ def _supports_vision_override(
                 per_model_raw = models_cfg.get(model)
                 per_model = per_model_raw if isinstance(per_model_raw, dict) else {}
                 coerced = _coerce_capability_bool(
-                    per_model.get("supports_vision", per_model.get("vision"))
+                    per_model.get(primary_key, per_model.get(alias_key))
                 )
                 if coerced is not None:
                     return coerced
 
     return None
+
+
+def _supports_vision_override(
+    cfg: Optional[Dict[str, Any]],
+    provider: str,
+    model: str,
+    *,
+    requested_provider: str = "",
+) -> Optional[bool]:
+    """Resolve user-declared vision capability from config.yaml."""
+    return _supports_capability_override(
+        cfg,
+        provider,
+        model,
+        primary_key="supports_vision",
+        alias_key="vision",
+        requested_provider=requested_provider,
+    )
 
 
 def _resolve_inference_base_url(

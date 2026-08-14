@@ -594,6 +594,8 @@ def _convert_content_to_converse(content) -> List[Dict]:
                     # Remote URL — Converse doesn't support URLs directly,
                     # include as text reference for the model.
                     blocks.append({"text": f"[Image: {url}]"})
+            elif part_type in {"input_audio", "audio"}:
+                blocks.append({"text": "[audio]"})
         return blocks if blocks else [{"text": _EMPTY_TEXT_PLACEHOLDER}]
     return [{"text": _safe_text(content)}]
 

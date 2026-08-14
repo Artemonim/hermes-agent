@@ -1363,6 +1363,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
     if agent.api_mode == "anthropic_messages":
         _transport = agent._get_transport()
         anthropic_messages = agent._prepare_anthropic_messages_for_api(api_messages)
+        anthropic_messages = agent._prepare_messages_for_non_audio_model(anthropic_messages)
         ctx_len = getattr(agent, "context_compressor", None)
         ctx_len = ctx_len.context_length if ctx_len else None
         ephemeral_out = getattr(agent, "_ephemeral_max_output_tokens", None)
@@ -1418,6 +1419,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         )
         is_xai_responses = agent.provider in {"xai", "xai-oauth"} or agent._base_url_hostname == "api.x.ai"
         _msgs_for_codex = agent._prepare_messages_for_non_vision_model(api_messages)
+        _msgs_for_codex = agent._prepare_messages_for_non_audio_model(_msgs_for_codex)
 
         # Native server-side compaction (gpt-5.6 on direct OpenAI API /
         # ChatGPT Codex routes only) — None on every other route/model, in
@@ -1564,6 +1566,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
         # (e.g. DeepSeek, Kimi). The legacy path below already does this, but
         # registered providers with profiles were bypassing the strip.
         api_messages = agent._prepare_messages_for_non_vision_model(api_messages)
+        api_messages = agent._prepare_messages_for_non_audio_model(api_messages)
 
         return _ct.build_kwargs(
             model=agent.model,
@@ -1596,6 +1599,7 @@ def build_api_kwargs(agent, api_messages: list, tools_for_api: list | None = Non
 
     # Strip image parts for non-vision models (no-op when vision-capable).
     _msgs_for_chat = agent._prepare_messages_for_non_vision_model(api_messages)
+    _msgs_for_chat = agent._prepare_messages_for_non_audio_model(_msgs_for_chat)
 
     return _ct.build_kwargs(
         model=agent.model,

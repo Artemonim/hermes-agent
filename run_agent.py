@@ -2217,14 +2217,12 @@ class AIAgent:
                 if _is_multimodal_tool_result(content):
                     content = _multimodal_text_summary(content)
                 elif isinstance(content, list):
-                    # List of OpenAI-style content parts: strip images, keep text.
-                    _txt = []
-                    for p in content:
-                        if isinstance(p, dict) and p.get("type") == "text":
-                            _txt.append(str(p.get("text", "")))
-                        elif isinstance(p, dict) and p.get("type") in {"image", "image_url", "input_image"}:
-                            _txt.append("[screenshot]")
-                    content = "\n".join(_txt) if _txt else None
+                    # List of OpenAI-style content parts: strip images/audio,
+                    # keep text. Native audio is current-turn-only and must
+                    # not land as base64 in the session DB.
+                    from agent.audio_routing import flatten_audio_parts_for_persist
+
+                    content = flatten_audio_parts_for_persist(content)
                 tool_calls_data = None
                 if hasattr(msg, "tool_calls") and isinstance(msg.tool_calls, list) and msg.tool_calls:
                     tool_calls_data = [
@@ -6723,6 +6721,25 @@ class AIAgent:
         except Exception:
             return False
 
+    def _model_supports_audio(self) -> bool:
+        """Return True if the active provider+model reports native audio input.
+
+        Used to decide whether to strip ``input_audio`` parts from API-bound
+        messages (for text-only models) or let adapters pass them through.
+        """
+        try:
+            from hermes_cli.config import load_config
+            from agent.audio_routing import _lookup_supports_audio
+            cfg = load_config()
+            provider = (getattr(self, "provider", "") or "").strip()
+            model = (getattr(self, "model", "") or "").strip()
+            requested = (getattr(self, "requested_provider", "") or "").strip()
+            return _lookup_supports_audio(
+                provider, model, cfg, requested_provider=requested,
+            ) is True
+        except Exception:
+            return False
+
     def _provider_supports_vision_tool_messages(self) -> bool:
         """Return True if the active provider accepts list-type tool content.
 
@@ -6862,6 +6879,32 @@ class AIAgent:
             )
         return transformed
 
+    def _prepare_messages_for_non_audio_model(self, api_messages: list) -> list:
+        """Strip native audio parts when the active model cannot hear.
+
+        Native audio is current-turn-only. When the model *does* support
+        audio, mark the in-flight flag so ``audio_analyze`` does not attach
+        a second clip on Gemini 3.x Flash (one file per prompt).
+        """
+        from agent.audio_routing import (
+            clear_native_audio_in_flight,
+            mark_native_audio_in_flight,
+            messages_have_audio_parts,
+            replace_audio_parts_with_placeholder,
+        )
+
+        if not messages_have_audio_parts(api_messages):
+            return api_messages
+
+        if self._model_supports_audio():
+            mark_native_audio_in_flight()
+            return api_messages
+
+        transformed = copy.deepcopy(api_messages)
+        replace_audio_parts_with_placeholder(transformed)
+        clear_native_audio_in_flight()
+        return transformed
+
     def _tool_result_content_for_active_model(self, tool_name: str, result: Any) -> Any:
         """Return the tool message content that is safe for the active model.
 
@@ -6875,7 +6918,22 @@ class AIAgent:
             return result
 
         content = result.get("content") or []
-        if not self._content_has_image_parts(content):
+        from agent.audio_routing import content_has_audio_parts
+
+        has_images = self._content_has_image_parts(content)
+        has_audio = content_has_audio_parts(content)
+        if not has_images and not has_audio:
+            return content
+        if has_audio and not self._model_supports_audio():
+            logger.warning(
+                "Tool %s returned audio content for non-audio model %s/%s; "
+                "falling back to text summary",
+                tool_name,
+                self.provider,
+                self.model,
+            )
+            return _multimodal_text_summary(result)
+        if not has_images:
             return content
 
         if self._model_supports_vision():

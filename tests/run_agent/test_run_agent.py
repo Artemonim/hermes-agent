@@ -117,6 +117,30 @@ def test_flush_persist_override_replaces_api_local_multimodal_note(agent):
     assert api_content[0]["text"] == "[MODEL SWITCH NOTE]\n\nDescribe this screenshot"
 
 
+def test_flush_persist_flattens_native_audio_to_placeholder(agent):
+    """Native input_audio bytes must not land in the session DB."""
+    content = [
+        {"type": "text", "text": "voice note"},
+        {
+            "type": "input_audio",
+            "input_audio": {"data": "QQ==", "format": "mp3"},
+        },
+    ]
+    agent._session_db = MagicMock()
+    agent._session_db_created = True
+    agent.session_id = "session-audio"
+    agent._last_flushed_db_idx = 0
+    agent._persist_user_message_idx = None
+    agent._persist_user_message_override = None
+    agent._persist_user_message_timestamp = None
+
+    agent._flush_messages_to_session_db([{"role": "user", "content": content}], [])
+
+    batch = agent._session_db.append_messages_batch.call_args.kwargs["messages"]
+    assert batch[0]["content"] == "voice note\n[audio]"
+    assert content[1]["type"] == "input_audio"
+
+
 def test_direct_session_db_flushes_share_marker_claim(agent):
     """A direct flush cannot interleave its marker check with `_persist_session`."""
     class _BarrierDB:

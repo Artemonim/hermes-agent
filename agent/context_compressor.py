@@ -780,6 +780,11 @@ _IMAGE_TOKEN_ESTIMATE = 1600
 # compressor speaks in.  Used when accumulating message "content length"
 # for tail-cut decisions.
 _IMAGE_CHAR_EQUIVALENT = _IMAGE_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
+# Native audio is current-turn-only, but the compressor may still see the
+# live clip before end-of-turn strip. Gemini bills by duration; 2000 tokens
+# is a conservative ceiling for a typical voice note.
+_AUDIO_TOKEN_ESTIMATE = 2000
+_AUDIO_CHAR_EQUIVALENT = _AUDIO_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600
 
 # Hard ceiling for the deterministic summary-failure handoff.  The fallback is
@@ -906,6 +911,8 @@ def _content_length_for_budget(raw_content: Any) -> int:
         ptype = p.get("type")
         if ptype in {"image_url", "input_image", "image"}:
             total += _IMAGE_CHAR_EQUIVALENT
+        elif ptype in {"input_audio", "audio"}:
+            total += _AUDIO_CHAR_EQUIVALENT
         else:
             # text / input_text / tool_result-with-text / anything else with
             # a text field.  Ignore the raw base64 payload inside image_url
@@ -3557,6 +3564,8 @@ class ContextCompressor(ContextEngine):
                             text_parts.append(part.get("text", ""))
                         elif ptype in {"image", "image_url", "input_image"}:
                             text_parts.append(_image_part_label(part))
+                        elif ptype in {"input_audio", "audio"}:
+                            text_parts.append("[audio]")
                         else:
                             # Unknown part type — keep a marker so the
                             # summarizer knows content existed here.

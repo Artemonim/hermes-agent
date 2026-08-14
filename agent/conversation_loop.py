@@ -58,6 +58,7 @@ from agent.message_sanitization import (
     _strip_images_from_messages,
     _strip_non_ascii,
 )
+from agent.audio_routing import replace_audio_parts_with_placeholder
 # Must mirror _STALE_TOOL_CALL_MARKER_RE in hermes_state.py — kept local
 # to avoid importing hermes_state at module load time (its module-level
 # DEFAULT_DB_PATH = get_hermes_home() / "state.db" breaks tests that
@@ -4111,6 +4112,32 @@ def run_conversation(
                         f"{agent.log_prefix}⚠️  Server rejected image content — "
                         f"switching to text-only mode for this session"
                         + (". Stripped images from history and retrying." if _imgs_removed else "."),
+                        force=True,
+                    )
+                    continue
+
+                _AUDIO_REJECTION_PHRASES = (
+                    "does not support audio",
+                    "audio input is not supported",
+                    "no endpoints found that support audio",
+                    "only one audio file",
+                    "maximum number of audio files",
+                    "too many audio files",
+                )
+                _looks_like_audio_rejection = any(
+                    p in _err_lower for p in _AUDIO_REJECTION_PHRASES
+                )
+                if _looks_like_audio_rejection and _status_ok:
+                    from agent.audio_routing import clear_native_audio_in_flight
+
+                    _audio_removed = replace_audio_parts_with_placeholder(messages)
+                    if isinstance(api_messages, list):
+                        replace_audio_parts_with_placeholder(api_messages)
+                    clear_native_audio_in_flight()
+                    agent._vprint(
+                        f"{agent.log_prefix}⚠️  Server rejected native audio — "
+                        f"continuing with transcript/path notes only"
+                        + (". Stripped audio from history and retrying." if _audio_removed else "."),
                         force=True,
                     )
                     continue

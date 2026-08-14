@@ -116,6 +116,23 @@ def test_parallel_tool_results_merge_into_one_user_content():
     assert outputs == ["AAA", "BBB"]
 
 
+def test_input_audio_becomes_gemini_inline_data():
+    from agent.gemini_native_adapter import _extract_multimodal_parts
+
+    parts = _extract_multimodal_parts(
+        [
+            {"type": "text", "text": "listen"},
+            {
+                "type": "input_audio",
+                "input_audio": {"data": "YWJj", "format": "mp3"},
+            },
+        ]
+    )
+    assert parts[0] == {"text": "listen"}
+    assert parts[1]["inlineData"]["mimeType"] == "audio/mp3"
+    assert parts[1]["inlineData"]["data"] == "YWJj"
+
+
 def test_consecutive_user_messages_merge_for_gemini_alternation():
     """Back-to-back user messages must also be merged, not sent as two
     consecutive user contents."""

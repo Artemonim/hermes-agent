@@ -266,6 +266,18 @@ DEFAULT_CONFIG = {
         # remains available as a tool regardless of this setting — the routing
         # only controls how inbound user images are presented.
         "image_input_mode": "auto",
+        # How user-attached audio (voice notes, audio files, video soundtracks)
+        # is presented to the main model on each turn.
+        #   "auto"   — attach natively when the active model reports
+        #              supports_audio=True (config override, models.dev, or
+        #              Gemini 3.5+ slug heuristic). Otherwise keep STT /
+        #              path notes only.
+        #   "native" — always attach the waveform on the current user turn.
+        #   "text"   — never attach native audio; STT / path notes only.
+        # Native audio is current-turn-only (not persisted). Voice-note STT
+        # and its echo still run alongside native attach. video_analyze stays
+        # opt-in; this path never sends native video.
+        "audio_input_mode": "auto",
         "disabled_toolsets": [],
 
         # Per-model reasoning effort overrides (spelling-tolerant).

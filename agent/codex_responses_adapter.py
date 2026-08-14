@@ -199,6 +199,9 @@ def _chat_content_to_responses_parts(content: Any, *, role: str = "user") -> Lis
             if isinstance(detail, str) and detail.strip():
                 image_part["detail"] = detail.strip()
             converted.append(image_part)
+            continue
+        if ptype in {"input_audio", "audio"}:
+            converted.append({"type": text_type, "text": "[audio]"})
     return converted
 
 
@@ -225,6 +228,7 @@ def _summarize_user_message_for_log(content: Any, *, sep: str = " ") -> str:
     if isinstance(content, list):
         text_bits: List[str] = []
         image_count = 0
+        audio_count = 0
         for part in content:
             if isinstance(part, str):
                 if part:
@@ -239,9 +243,14 @@ def _summarize_user_message_for_log(content: Any, *, sep: str = " ") -> str:
                     text_bits.append(text)
             elif ptype in {"image_url", "input_image"}:
                 image_count += 1
+            elif ptype in {"input_audio", "audio"}:
+                audio_count += 1
         summary = sep.join(text_bits).strip()
         if image_count:
             note = f"[{image_count} image{'s' if image_count != 1 else ''}]"
+            summary = f"{note} {summary}" if summary else note
+        if audio_count:
+            note = f"[{audio_count} audio]"
             summary = f"{note} {summary}" if summary else note
         return summary
     try:

@@ -44,6 +44,8 @@ _HERMES_CORE_TOOLS = [
     "read_file", "write_file", "patch", "search_files",
     # Vision + image generation
     "vision_analyze", "image_generate",
+    # Native audio / soundtrack listen (STT fallback when the model cannot hear)
+    "audio_analyze",
     # BFL FLUX 3 video generation
     "bfl_flux3_text_to_video", "bfl_flux3_image_to_video",
     "bfl_flux3_keyframes_to_video", "bfl_flux3_video_continuation",
@@ -130,6 +132,12 @@ TOOLSETS = {
     "vision": {
         "description": "Image analysis and vision tools",
         "tools": ["vision_analyze"],
+        "includes": []
+    },
+
+    "audio": {
+        "description": "Listen to audio files and video soundtracks",
+        "tools": ["audio_analyze"],
         "includes": []
     },
 
@@ -405,6 +413,7 @@ TOOLSETS = {
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
+            "audio_analyze",
             "skills_list", "skill_view", "skill_manage",
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
@@ -437,6 +446,7 @@ TOOLSETS = {
             "terminal", "process",
             "read_file", "write_file", "patch", "search_files",
             "vision_analyze",
+            "audio_analyze",
             "skills_list", "skill_view", "skill_manage",
             "browser_navigate", "browser_snapshot", "browser_click",
             "browser_type", "browser_scroll", "browser_back",
@@ -458,8 +468,8 @@ TOOLSETS = {
             "terminal", "process",
             # File manipulation
             "read_file", "write_file", "patch", "search_files",
-            # Vision + image generation
-            "vision_analyze", "image_generate",
+            # Vision + image generation + audio listen
+            "vision_analyze", "audio_analyze", "image_generate",
             # BFL FLUX 3 video generation
             "bfl_flux3_text_to_video", "bfl_flux3_image_to_video",
             "bfl_flux3_keyframes_to_video", "bfl_flux3_video_continuation",

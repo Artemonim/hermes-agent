@@ -333,6 +333,12 @@ CAPS_REGISTRY = {
                 "modalities": {"input": ["text", "image"]},
                 "limit": {"context": 128000, "output": 8192},
             },
+            "gemini-3.7-flash": {
+                "id": "gemini-3.7-flash",
+                "tool_call": True,
+                "modalities": {"input": ["text", "image", "audio"]},
+                "limit": {"context": 1048576, "output": 65536},
+            },
             "gemma-3-1b": {
                 "id": "gemma-3-1b",
                 "tool_call": True,
@@ -370,6 +376,20 @@ class TestGetModelCapabilities:
             caps = get_model_capabilities("anthropic", "claude-sonnet-4")
         assert caps is not None
         assert caps.supports_vision is True
+
+    def test_audio_from_modalities_input(self):
+        with patch("agent.models_dev.fetch_models_dev", return_value=CAPS_REGISTRY):
+            caps = get_model_capabilities("gemini", "gemini-3.7-flash")
+        assert caps is not None
+        assert caps.supports_audio is True
+        assert caps.supports_vision is True
+
+    def test_image_modalities_do_not_imply_audio(self):
+        with patch("agent.models_dev.fetch_models_dev", return_value=CAPS_REGISTRY):
+            caps = get_model_capabilities("gemini", "gemma-4-31b-it")
+        assert caps is not None
+        assert caps.supports_vision is True
+        assert caps.supports_audio is False
 
 
 

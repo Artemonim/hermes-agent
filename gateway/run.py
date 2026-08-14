@@ -5547,32 +5547,43 @@ class TurnRunner:
         _approval_session_token = set_current_session_key(_approval_session_key)
         register_gateway_notify(_approval_session_key, _approval_notify_sync)
         try:
-            # If _prepare_inbound_message_text buffered image paths for native
-            # attachment, wrap the user turn as an OpenAI-style multimodal
-            # content list. Consume-and-clear so subsequent turns on the same
-            # runner instance don't re-attach stale images.
+            # If _prepare_inbound_message_text buffered image/audio paths for
+            # native attachment, wrap the user turn as an OpenAI-style
+            # multimodal content list. Consume-and-clear so subsequent turns
+            # on the same runner instance don't re-attach stale media.
             _native_imgs = self._runner._consume_pending_native_image_paths(ctx.session_key)
-            if _native_imgs:
+            _native_audio = self._runner._consume_pending_native_audio_paths(ctx.session_key)
+            if _native_imgs or _native_audio:
                 try:
-                    from agent.image_routing import build_native_content_parts
-                    _parts, _skipped = build_native_content_parts(
-                        ctx.message,
+                    from agent.audio_routing import merge_native_media_parts
+                    _parts, _skipped_imgs, _skipped_audio = merge_native_media_parts(
+                        ctx.message if isinstance(ctx.message, str) else "",
                         _native_imgs,
+                        _native_audio,
                     )
-                    if _skipped:
+                    if _skipped_imgs:
                         logger.warning(
                             "Native image attachment: skipped %d unreadable path(s): %s",
-                            len(_skipped), _skipped,
+                            len(_skipped_imgs), _skipped_imgs,
                         )
-                    if any(p.get("type") == "image_url" for p in _parts):
+                    if _skipped_audio:
+                        logger.info(
+                            "Native audio attachment: skipped %d clip(s) (unreadable, "
+                            "silent, or over the 1-file cap): %s",
+                            len(_skipped_audio), _skipped_audio,
+                        )
+                    if isinstance(_parts, list) and any(
+                        isinstance(p, dict)
+                        and p.get("type") in {"image_url", "input_audio", "audio"}
+                        for p in _parts
+                    ):
                         _run_message: Any = _parts
                     else:
-                        # All images failed to read — fall back to plain text.
                         _run_message = ctx.message
-                except Exception as _img_exc:
+                except Exception as _media_exc:
                     logger.warning(
-                        "Native image attachment failed, falling back to text: %s",
-                        _img_exc,
+                        "Native media attachment failed, falling back to text: %s",
+                        _media_exc,
                     )
                     _run_message = ctx.message
             else:
@@ -5914,6 +5925,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     _pending_messages = legacy_dict_property("_pending_messages")
     _pending_native_image_paths_by_session = legacy_dict_property(
         "_pending_native_image_paths_by_session"
+    )
+    _pending_native_audio_paths_by_session = legacy_dict_property(
+        "_pending_native_audio_paths_by_session"
     )
     _session_ephemeral_pin = legacy_dict_property("_session_ephemeral_pin")
     _session_vc_last = legacy_dict_property("_session_vc_last")
@@ -16216,11 +16230,15 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         document notes, reply context, and @ references all behave the same.
 
         Side effect: buffers per-session native image paths when the active
-        model supports native vision AND the user has images attached. The
-        caller consumes and clears that session-scoped buffer at the
+        model supports native vision AND the user has images attached, and
+        native audio paths when the active model supports native audio AND
+        the user sent a voice note, audio file, or video with a soundtrack.
+        The caller consumes and clears those session-scoped buffers at the
         ``run_conversation`` site to build a multimodal user turn. When the
-        list is empty, the ``_enrich_message_with_vision`` text path has
-        already run and images are represented in-text.
+        image list is empty, the ``_enrich_message_with_vision`` text path has
+        already run and images are represented in-text. Voice-note STT (and
+        its echo) still run even when native audio is also attached — the
+        transcript is the durable evidence.
         """
         history = history or []
         _pending_stt_prepared = hasattr(event, "_gateway_pending_stt_text")
@@ -16238,6 +16256,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # Reset only this session's per-call buffer; other sessions may be
         # concurrently preparing multimodal turns on the same runner.
         self._consume_pending_native_image_paths(session_key)
+        self._consume_pending_native_audio_paths(session_key)
 
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
@@ -16279,6 +16298,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if event.media_urls:
             image_paths = []
             audio_paths = []
+            voice_native_paths: list[str] = []
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 # Classify images per-attachment: trust this attachment's own
@@ -16292,8 +16312,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # MessageType.VOICE = voice message (Opus/OGG) — always STT
                 if event.message_type == MessageType.AUDIO:
                     audio_file_paths.append(path)
-                elif not _pending_stt_prepared and _event_media_is_stt_input(event, i):
-                    audio_paths.append(path)
+                elif _event_media_is_stt_input(event, i):
+                    voice_native_paths.append(path)
+                    if not _pending_stt_prepared:
+                        audio_paths.append(path)
                 if mtype.startswith("video/") or (not mtype and event.message_type == MessageType.VIDEO):
                     video_paths.append(path)
 
@@ -16392,6 +16414,34 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # The enrichment step now leaves a single neutral marker in the
                 # prompt, so the LLM produces one coherent reply in the user's
                 # language. The hardcoded send has therefore been removed.
+
+            native_audio_candidates: list[str] = []
+            if voice_native_paths:
+                native_audio_candidates.extend(voice_native_paths)
+            if audio_file_paths:
+                native_audio_candidates.extend(audio_file_paths)
+            if video_paths:
+                native_audio_candidates.extend(video_paths)
+            if native_audio_candidates:
+                _audio_mode = await asyncio.to_thread(
+                    self._decide_audio_input_mode,
+                    source=source,
+                    session_key=session_key,
+                )
+                if _audio_mode == "native":
+                    self._session_state(
+                        session_key
+                    ).persistent.native_audio_paths = list(native_audio_candidates)
+                    logger.info(
+                        "Audio routing: native (model supports audio). "
+                        "%d clip(s) staged; at most one attaches inline.",
+                        len(native_audio_candidates),
+                    )
+                else:
+                    logger.info(
+                        "Audio routing: text (mode=%s). STT / path notes only.",
+                        _audio_mode,
+                    )
 
         if audio_file_paths:
             from tools.credential_files import to_agent_visible_cache_path as _to_agent_path
@@ -16663,6 +16713,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return []
         paths = list(state.persistent.native_image_paths)
         state.persistent.native_image_paths = []
+        return paths
+
+    def _consume_pending_native_audio_paths(self, session_key: str) -> List[str]:
+        state = self._peek_session_state(session_key)
+        if state is None or not state.persistent.native_audio_paths:
+            return []
+        paths = list(state.persistent.native_audio_paths)
+        state.persistent.native_audio_paths = []
         return paths
 
     def _cache_session_source(self, session_key: str, source) -> None:
@@ -22100,6 +22158,75 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
         except Exception as exc:
             logger.debug("image_routing: decision failed, falling back to text — %s", exc)
+            return "text"
+
+    def _decide_audio_input_mode(
+        self,
+        *,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+        user_config: Optional[dict] = None,
+        provider: Optional[str] = None,
+        model: Optional[str] = None,
+    ) -> str:
+        """Resolve audio-input routing for the effective model this turn.
+
+        Returns ``"native"`` (attach waveform on the user turn) or ``"text"``
+        (STT / path notes only). See agent/audio_routing.py.
+
+        Mirrors ``_decide_image_input_mode`` so /model overrides apply to
+        voice notes the same way they apply to photos.
+        """
+        try:
+            from agent.audio_routing import decide_audio_input_mode
+            from agent.auxiliary_client import _read_main_model, _read_main_provider
+            from hermes_cli.config import load_config
+
+            cfg = user_config if isinstance(user_config, dict) else load_config()
+            resolved_provider = (provider or "").strip()
+            resolved_model = (model or "").strip()
+            resolved_requested_provider = ""
+
+            needs_session_runtime = not resolved_provider or not resolved_model
+            has_session_identity = source is not None or session_key
+            if needs_session_runtime and has_session_identity:
+                try:
+                    turn_model, runtime_kwargs = self._resolve_session_agent_runtime(
+                        source=source,
+                        session_key=session_key,
+                        user_config=cfg,
+                    )
+                    if not resolved_model and isinstance(turn_model, str):
+                        resolved_model = turn_model.strip()
+                    runtime_provider = runtime_kwargs.get("provider") if isinstance(runtime_kwargs, dict) else None
+                    runtime_requested_provider = (
+                        runtime_kwargs.get("requested_provider")
+                        if isinstance(runtime_kwargs, dict)
+                        else None
+                    )
+                    if not resolved_provider and isinstance(runtime_provider, str):
+                        resolved_provider = runtime_provider.strip()
+                    if isinstance(runtime_requested_provider, str):
+                        resolved_requested_provider = runtime_requested_provider.strip()
+                except Exception as exc:
+                    logger.debug(
+                        "audio_routing: session runtime resolution failed, falling back to config — %s",
+                        exc,
+                    )
+
+            if not resolved_provider:
+                resolved_provider = _read_main_provider()
+            if not resolved_model:
+                resolved_model = _read_main_model()
+
+            return decide_audio_input_mode(
+                resolved_provider,
+                resolved_model,
+                cfg,
+                requested_provider=resolved_requested_provider,
+            )
+        except Exception as exc:
+            logger.debug("audio_routing: decision failed, falling back to text — %s", exc)
             return "text"
 
     async def _enrich_message_with_vision(
