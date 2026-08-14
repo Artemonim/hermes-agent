@@ -276,7 +276,8 @@ DEFAULT_CONFIG = {
         #   "text"   — never attach native audio; STT / path notes only.
         # Native audio is current-turn-only (not persisted). Voice-note STT
         # and its echo still run alongside native attach. video_analyze stays
-        # opt-in; this path never sends native video.
+        # opt-in; this path never sends native video. Sampled stills are
+        # ``video.frame_extract`` (command provider / ffmpeg) on the image path.
         "audio_input_mode": "auto",
         "disabled_toolsets": [],
 
@@ -1618,6 +1619,27 @@ DEFAULT_CONFIG = {
             "model": "",  # empty = first stt-tagged model from the live catalog
             # "base_url": "",  # override DEEPINFRA_BASE_URL for STT only
         },
+    },
+
+    # Inbound video presentation. There is no native video container on the
+    # wire: visuals are sampled stills (``image_url``) and the soundtrack
+    # uses ``agent.audio_input_mode``. Frame extraction is opt-in.
+    #
+    # ``video.providers.<name>: type: command`` mirrors STT command providers.
+    # Point ``command`` at any CLI that writes stills into ``{output_dir}``
+    # and prints a JSON manifest ``{"frames": [...]}`` (or one path per line).
+    # Empty ``frame_extract.provider`` uses a best-effort ffmpeg fallback.
+    "video": {
+        "frame_extract": {
+            "enabled": False,
+            "provider": "",  # name under video.providers; empty = ffmpeg
+            "fps": 0.2,
+            "fps_fallback": 0.2,
+            "frame_budget": 20,  # per video; 0 = no per-file cap
+            "max_frames_per_turn": 20,
+            "timeout": 180,
+        },
+        "providers": {},
     },
 
     "voice": {

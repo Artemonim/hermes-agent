@@ -427,6 +427,13 @@ def finalize_turn(
     except Exception:
         logger.debug("finalize_turn: native-audio strip failed", exc_info=True)
 
+    try:
+        from agent.video_frame_extract import replace_ephemeral_video_frame_parts
+
+        replace_ephemeral_video_frame_parts(messages)
+    except Exception:
+        logger.debug("finalize_turn: video-frame strip failed", exc_info=True)
+
     # The gateway owns a separate in-memory history snapshot. Keep it current
     # even when finalization reports a cleanup error: a later prompt must not be
     # sent with the pre-turn snapshot while the durable DB already has this turn.

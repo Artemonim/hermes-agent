@@ -3292,6 +3292,32 @@ def sanitize_api_messages(messages: List[Dict[str, Any]]) -> List[Dict[str, Any]
         filtered.append(msg)
     messages = filtered
 
+    # --- Strip internal ephemeral tags from the per-call copy ---
+    # Sampled video stills carry ``_hermes_ephemeral`` on live messages so
+    # persist / end-of-turn strip can tell them from user photos. Providers
+    # must not see that key.
+    stripped_ephemeral = 0
+    ephemeral_cleaned: List[Dict[str, Any]] = []
+    for msg in messages:
+        content = msg.get("content") if isinstance(msg, dict) else None
+        if not isinstance(content, list) or not any(
+            isinstance(part, dict) and "_hermes_ephemeral" in part
+            for part in content
+        ):
+            ephemeral_cleaned.append(msg)
+            continue
+        msg = dict(msg)
+        msg["content"] = [
+            {k: v for k, v in part.items() if k != "_hermes_ephemeral"}
+            if isinstance(part, dict) and "_hermes_ephemeral" in part
+            else part
+            for part in content
+        ]
+        ephemeral_cleaned.append(msg)
+        stripped_ephemeral += 1
+    if stripped_ephemeral:
+        messages = ephemeral_cleaned
+
     # --- Heal empty-content non-final messages (self-recovery) ---
     # A dead stream can leave an empty assistant stub (or an empty user turn)
     # mid-transcript; the provider then 400s EVERY subsequent request until it

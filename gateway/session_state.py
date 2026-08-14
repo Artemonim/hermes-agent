@@ -144,6 +144,9 @@ class PersistentState:
     # consumed one-shot. Bytes are not persisted — only the live API turn
     # hears the clip.
     native_audio_paths: List[str] = field(default_factory=list)
+    # Sampled video stills staged for native image attach; consumed one-shot.
+    # Tagged ephemeral at merge so persist/live strip do not keep the pixels.
+    native_video_frame_paths: List[str] = field(default_factory=list)
     # Legacy runner-level pending message text (write-mostly; flushed to
     # disk on shutdown — see #72680).  NOTE: distinct from the adapter-level
     # ``_pending_messages`` (Dict[str, MessageEvent]) in gateway/base.py,
@@ -413,6 +416,9 @@ LEGACY_FIELD_SPECS: Dict[str, _FieldSpec] = {
     ),
     "_pending_native_audio_paths_by_session": _FieldSpec(
         "persistent", "native_audio_paths", list, _present_nonzero
+    ),
+    "_pending_native_video_frame_paths_by_session": _FieldSpec(
+        "persistent", "native_video_frame_paths", list, _present_nonzero
     ),
     "_pending_messages": _FieldSpec(
         "persistent", "pending_command_text", lambda: None, _present_not_none

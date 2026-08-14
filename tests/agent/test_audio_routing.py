@@ -122,6 +122,20 @@ class TestReplaceAndFlatten:
             f"caption\n[screenshot]\n{AUDIO_PERSIST_PLACEHOLDER}"
         )
 
+    def test_flatten_ephemeral_video_frames_as_video(self):
+        content = [
+            {"type": "text", "text": "clip"},
+            {
+                "type": "image_url",
+                "image_url": {"url": "data:image/png;base64,AAAA"},
+                "_hermes_ephemeral": "video_frame",
+            },
+            {"type": "image_url", "image_url": {"url": "data:image/png;base64,BBBB"}},
+        ]
+        assert flatten_audio_parts_for_persist(content) == (
+            "clip\n[video]\n[screenshot]"
+        )
+
     def test_replace_preserves_images(self):
         messages = [
             {

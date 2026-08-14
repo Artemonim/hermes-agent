@@ -28,7 +28,9 @@ the clip on the next user turn. Voice-note STT (and its echo) still run
 alongside native attach — the transcript is the durable evidence.
 
 There is no native video path. A video file may contribute a soundtrack
-extracted with ffmpeg; silent clips are skipped.
+extracted with ffmpeg; silent clips are skipped. Sampled stills (when
+``video.frame_extract`` is enabled) attach as ephemeral ``image_url``
+parts — see ``agent.video_frame_extract``.
 """
 
 from __future__ import annotations
@@ -388,7 +390,10 @@ def flatten_audio_parts_for_persist(content: Any) -> Optional[str]:
         if ptype == "text":
             chunks.append(str(part.get("text", "")))
         elif ptype in {"image", "image_url", "input_image"}:
-            chunks.append("[screenshot]")
+            if part.get("_hermes_ephemeral") == "video_frame":
+                chunks.append("[video]")
+            else:
+                chunks.append("[screenshot]")
         elif ptype in AUDIO_PART_TYPES:
             chunks.append(AUDIO_PERSIST_PLACEHOLDER)
     return "\n".join(chunks) if chunks else None
@@ -724,12 +729,64 @@ def append_native_audio_parts(
     return parts, skipped
 
 
+def _append_image_paths(
+    content: Any,
+    image_paths: Sequence[str],
+    *,
+    ephemeral_tag: Optional[str] = None,
+) -> Tuple[Any, List[str]]:
+    """Attach local images onto *content*, optionally tagging them ephemeral."""
+    from agent.image_routing import build_native_content_parts
+
+    existing_images: List[Dict[str, Any]] = []
+    existing_audio: List[Dict[str, Any]] = []
+    base_text = content if isinstance(content, str) else ""
+    if isinstance(content, list):
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            ptype = part.get("type")
+            if ptype == "text" and not base_text:
+                base_text = str(part.get("text") or "")
+            elif ptype == "image_url":
+                existing_images.append(part)
+            elif ptype in AUDIO_PART_TYPES:
+                existing_audio.append(part)
+    new_parts, skipped = build_native_content_parts(
+        base_text if isinstance(base_text, str) else "",
+        list(image_paths),
+    )
+    new_images = [
+        p for p in new_parts
+        if isinstance(p, dict) and p.get("type") == "image_url"
+    ]
+    if ephemeral_tag:
+        for part in new_images:
+            part["_hermes_ephemeral"] = ephemeral_tag
+    if not new_images and not existing_images:
+        return content, skipped
+    new_text = base_text
+    for part in new_parts:
+        if isinstance(part, dict) and part.get("type") == "text":
+            new_text = str(part.get("text") or "")
+            break
+    parts: List[Dict[str, Any]] = [{"type": "text", "text": new_text or "The user sent media."}]
+    parts.extend(existing_images)
+    parts.extend(new_images)
+    parts.extend(existing_audio)
+    return parts, skipped
+
+
 def merge_native_media_parts(
     user_text: str,
     image_paths: Optional[Sequence[str]] = None,
     audio_paths: Optional[Sequence[str]] = None,
+    video_frame_paths: Optional[Sequence[str]] = None,
 ) -> Tuple[Any, List[str], List[str]]:
-    """Build a user-turn payload with native images and at most one audio clip.
+    """Build a user-turn payload with native images, video stills, and audio.
+
+    Video stills are tagged ``_hermes_ephemeral: video_frame`` so persist and
+    end-of-turn strip treat them like native audio. User photos stay untagged.
 
     Returns ``(content, skipped_images, skipped_audio)``. ``content`` is a
     parts list when any media attached, otherwise the original text string.
@@ -737,19 +794,12 @@ def merge_native_media_parts(
     skipped_images: List[str] = []
     content: Any = user_text
     if image_paths:
-        from agent.image_routing import build_native_content_parts
-
-        parts, skipped_images = build_native_content_parts(
-            user_text if isinstance(user_text, str) else "",
-            list(image_paths),
+        content, skipped_images = _append_image_paths(content, image_paths)
+    if video_frame_paths:
+        content, skipped_frames = _append_image_paths(
+            content, video_frame_paths, ephemeral_tag="video_frame",
         )
-        if any(
-            isinstance(p, dict) and p.get("type") == "image_url"
-            for p in parts
-        ):
-            content = parts
-        else:
-            content = user_text
+        skipped_images.extend(skipped_frames)
 
     skipped_audio: List[str] = []
     if audio_paths:

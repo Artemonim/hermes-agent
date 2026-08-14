@@ -5553,13 +5553,17 @@ class TurnRunner:
             # on the same runner instance don't re-attach stale media.
             _native_imgs = self._runner._consume_pending_native_image_paths(ctx.session_key)
             _native_audio = self._runner._consume_pending_native_audio_paths(ctx.session_key)
-            if _native_imgs or _native_audio:
+            _native_frames = self._runner._consume_pending_native_video_frame_paths(
+                ctx.session_key
+            )
+            if _native_imgs or _native_audio or _native_frames:
                 try:
                     from agent.audio_routing import merge_native_media_parts
                     _parts, _skipped_imgs, _skipped_audio = merge_native_media_parts(
                         ctx.message if isinstance(ctx.message, str) else "",
                         _native_imgs,
                         _native_audio,
+                        video_frame_paths=_native_frames,
                     )
                     if _skipped_imgs:
                         logger.warning(
@@ -5928,6 +5932,9 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     )
     _pending_native_audio_paths_by_session = legacy_dict_property(
         "_pending_native_audio_paths_by_session"
+    )
+    _pending_native_video_frame_paths_by_session = legacy_dict_property(
+        "_pending_native_video_frame_paths_by_session"
     )
     _session_ephemeral_pin = legacy_dict_property("_session_ephemeral_pin")
     _session_vc_last = legacy_dict_property("_session_vc_last")
@@ -16257,6 +16264,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # concurrently preparing multimodal turns on the same runner.
         self._consume_pending_native_image_paths(session_key)
         self._consume_pending_native_audio_paths(session_key)
+        self._consume_pending_native_video_frame_paths(session_key)
 
         _is_shared_multi_user = is_shared_multi_user_session(
             source,
@@ -16294,11 +16302,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # remains safe when ``event.media_urls`` is empty (no inner block runs).
         audio_file_paths: list[str] = []
         video_paths: list[str] = []
+        video_frame_counts: dict[str, int] = {}
 
         if event.media_urls:
             image_paths = []
             audio_paths = []
             voice_native_paths: list[str] = []
+            _img_mode = None
             for i, path in enumerate(event.media_urls):
                 mtype = event.media_types[i] if i < len(event.media_types) else ""
                 # Classify images per-attachment: trust this attachment's own
@@ -16443,6 +16453,45 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                         _audio_mode,
                     )
 
+            if video_paths:
+                from agent.video_frame_extract import (
+                    extract_video_frames,
+                    frame_extract_is_enabled,
+                    max_frames_per_turn,
+                )
+
+                if frame_extract_is_enabled():
+                    _frame_mode = _img_mode
+                    if _frame_mode is None:
+                        _frame_mode = await asyncio.to_thread(
+                            self._decide_image_input_mode,
+                            source=source,
+                            session_key=session_key,
+                        )
+                    if _frame_mode == "native":
+                        staged_frames: list[str] = []
+                        for _vpath in video_paths:
+                            extracted = await asyncio.to_thread(
+                                extract_video_frames, _vpath,
+                            )
+                            video_frame_counts[_vpath] = len(extracted)
+                            staged_frames.extend(extracted)
+                        _frame_cap = max_frames_per_turn()
+                        if _frame_cap and len(staged_frames) > _frame_cap:
+                            staged_frames = staged_frames[:_frame_cap]
+                        if staged_frames:
+                            self._session_state(
+                                session_key
+                            ).persistent.native_video_frame_paths = list(
+                                staged_frames
+                            )
+                            logger.info(
+                                "Video frame extract: staged %d still(s) "
+                                "from %d video(s).",
+                                len(staged_frames),
+                                len(video_paths),
+                            )
+
         if audio_file_paths:
             from tools.credential_files import to_agent_visible_cache_path as _to_agent_path
             for _apath in audio_file_paths:
@@ -16470,15 +16519,25 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 _display = _parts[2] if len(_parts) >= 3 else _basename
                 _display = re.sub(r'[^\w.\- ]', '_', _display)
                 _agent_path = _to_agent_path(_vpath)
-                _note = (
-                    f"[The user sent a video attachment: '{_display}'. "
-                    f"It is saved at: {_agent_path}. "
-                    f"Its content is not inlined here. If the user's request involves "
-                    f"what the video contains, inspect or process it yourself — for "
-                    f"example by passing the path to a video analysis or media tool — "
-                    f"instead of asking the user to describe it. Only ask what to do "
-                    f"with it if their intent is genuinely unclear.]"
-                )
+                _n_frames = int(video_frame_counts.get(_vpath) or 0)
+                if _n_frames:
+                    _note = (
+                        f"[The user sent a video attachment: '{_display}'. "
+                        f"It is saved at: {_agent_path}. "
+                        f"{_n_frames} sampled frame(s) are attached on this turn "
+                        f"as images. The soundtrack is attached when the model "
+                        f"supports native audio.]"
+                    )
+                else:
+                    _note = (
+                        f"[The user sent a video attachment: '{_display}'. "
+                        f"It is saved at: {_agent_path}. "
+                        f"Its content is not inlined here. If the user's request involves "
+                        f"what the video contains, inspect or process it yourself — for "
+                        f"example by passing the path to a video analysis or media tool — "
+                        f"instead of asking the user to describe it. Only ask what to do "
+                        f"with it if their intent is genuinely unclear.]"
+                    )
                 message_text = f"{_note}\n\n{message_text}"
 
         if event.media_urls:
@@ -16721,6 +16780,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return []
         paths = list(state.persistent.native_audio_paths)
         state.persistent.native_audio_paths = []
+        return paths
+
+    def _consume_pending_native_video_frame_paths(self, session_key: str) -> List[str]:
+        state = self._peek_session_state(session_key)
+        if state is None or not state.persistent.native_video_frame_paths:
+            return []
+        paths = list(state.persistent.native_video_frame_paths)
+        state.persistent.native_video_frame_paths = []
         return paths
 
     def _cache_session_source(self, session_key: str, source) -> None:
