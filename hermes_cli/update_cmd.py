@@ -2769,8 +2769,8 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     # the exact cost the shallow clone avoided) and the rev-list count below
     # would then report a huge bogus "behind" number. Detect shallow up front:
     # fetch with --depth 1 to preserve the boundary and report presence-only.
-    is_shallow = _m()._is_shallow_repository(git_cmd, _m().PROJECT_ROOT)
-    depth_args = ["--depth", "1"] if is_shallow else []
+    depth_args = _m()._shallow_fetch_depth_args(git_cmd, _m().PROJECT_ROOT)
+    is_shallow = bool(depth_args)
 
     if branch == "main":
         # Probe locally (~6 ms) whether an 'upstream' remote exists at all

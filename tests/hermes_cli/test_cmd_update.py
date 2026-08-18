@@ -309,20 +309,29 @@ class TestCmdUpdateShallowFetch:
                 cmds.append(argv)
         return cmds
 
-    @patch("hermes_cli.banner._github_compare_behind", return_value=1)
-    @patch("shutil.which", return_value=None)
-    @patch("subprocess.run")
-    def test_apply_fetch_passes_depth_1_on_shallow_checkout(
-        self, mock_run, _mock_which, _mock_compare, mock_args
-    ):
-        mock_run.side_effect = _make_run_side_effect(
-            branch="dev", verify_ok=True, commit_count="1", shallow=True
-        )
+    @staticmethod
+    def _run_apply_update():
         with patch(
             "hermes_cli.config.load_config",
             return_value={"updates": {"branch": "dev"}},
+        ), patch("hermes_cli.main._run_pre_update_backup", return_value=None), patch(
+            "hermes_cli.main._update_node_dependencies", return_value=[]
+        ), patch(
+            "hermes_cli.update_cmd._repair_node_deps_on_current_checkout"
+        ), patch(
+            "hermes_cli.main._build_web_ui"
         ):
-            cmd_update(mock_args)
+            cmd_update(SimpleNamespace(yes=True))
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_apply_fetch_passes_depth_1_on_shallow_checkout(
+        self, mock_run, _mock_which
+    ):
+        mock_run.side_effect = _make_run_side_effect(
+            branch="dev", verify_ok=True, commit_count="0", shallow=True
+        )
+        self._run_apply_update()
 
         origin_fetches = self._origin_fetch_cmds(mock_run)
         assert origin_fetches, "expected git fetch origin"
@@ -332,17 +341,11 @@ class TestCmdUpdateShallowFetch:
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
-    def test_apply_fetch_omits_depth_on_full_checkout(
-        self, mock_run, _mock_which, mock_args
-    ):
+    def test_apply_fetch_omits_depth_on_full_checkout(self, mock_run, _mock_which):
         mock_run.side_effect = _make_run_side_effect(
-            branch="dev", verify_ok=True, commit_count="1", shallow=False
+            branch="dev", verify_ok=True, commit_count="0", shallow=False
         )
-        with patch(
-            "hermes_cli.config.load_config",
-            return_value={"updates": {"branch": "dev"}},
-        ):
-            cmd_update(mock_args)
+        self._run_apply_update()
 
         origin_fetches = self._origin_fetch_cmds(mock_run)
         assert origin_fetches, "expected git fetch origin"
