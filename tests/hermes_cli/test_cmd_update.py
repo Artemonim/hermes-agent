@@ -10,7 +10,7 @@ import pytest
 from hermes_cli.main import _resolve_update_branch, cmd_update, PROJECT_ROOT
 
 
-def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
+def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0", *, shallow=False):
     """Build a side_effect function for subprocess.run that simulates git commands."""
 
     def side_effect(cmd, **kwargs):
@@ -19,6 +19,12 @@ def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0"):
         # git rev-parse --abbrev-ref HEAD  (get current branch)
         if "rev-parse" in joined and "--abbrev-ref" in joined:
             return subprocess.CompletedProcess(cmd, 0, stdout=f"{branch}\n", stderr="")
+
+        # git rev-parse --is-shallow-repository
+        if "rev-parse" in joined and "--is-shallow-repository" in joined:
+            return subprocess.CompletedProcess(
+                cmd, 0, stdout=("true\n" if shallow else "false\n"), stderr=""
+            )
 
         # git rev-parse --verify origin/{branch}  (check remote branch exists)
         if "rev-parse" in joined and "--verify" in joined:
@@ -282,6 +288,95 @@ class TestCmdUpdateBranchFallback:
             captured = capsys.readouterr()
             assert "applying safe config migrations" in captured.out
             assert "API keys require manual entry" in captured.out
+
+
+class TestCmdUpdateShallowFetch:
+    """Apply-path fetch must keep shallow installer checkouts at depth 1.
+
+    A bare ``git fetch origin <branch>`` against a shallow local origin fails
+    with ``Could not read <sha>`` / ``did not send all necessary objects``.
+    The --check path already passed ``--depth 1``; the apply path must too.
+    """
+
+    @staticmethod
+    def _origin_fetch_cmds(mock_run):
+        cmds = []
+        for call in mock_run.call_args_list:
+            if not call.args:
+                continue
+            argv = [str(part) for part in call.args[0]]
+            if "fetch" in argv and "origin" in argv:
+                cmds.append(argv)
+        return cmds
+
+    @patch("hermes_cli.banner._github_compare_behind", return_value=1)
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_apply_fetch_passes_depth_1_on_shallow_checkout(
+        self, mock_run, _mock_which, _mock_compare, mock_args
+    ):
+        mock_run.side_effect = _make_run_side_effect(
+            branch="dev", verify_ok=True, commit_count="1", shallow=True
+        )
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"updates": {"branch": "dev"}},
+        ):
+            cmd_update(mock_args)
+
+        origin_fetches = self._origin_fetch_cmds(mock_run)
+        assert origin_fetches, "expected git fetch origin"
+        for argv in origin_fetches:
+            depth_at = argv.index("--depth")
+            assert argv[depth_at + 1] == "1"
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_apply_fetch_omits_depth_on_full_checkout(
+        self, mock_run, _mock_which, mock_args
+    ):
+        mock_run.side_effect = _make_run_side_effect(
+            branch="dev", verify_ok=True, commit_count="1", shallow=False
+        )
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"updates": {"branch": "dev"}},
+        ):
+            cmd_update(mock_args)
+
+        origin_fetches = self._origin_fetch_cmds(mock_run)
+        assert origin_fetches, "expected git fetch origin"
+        for argv in origin_fetches:
+            assert "--depth" not in argv
+
+    @patch("hermes_cli.config.detect_install_method", return_value="git")
+    @patch("subprocess.run")
+    def test_check_fetch_passes_depth_1_on_shallow_checkout(self, mock_run, _mock_method):
+        def side_effect(cmd, **kwargs):
+            joined = " ".join(str(c) for c in cmd)
+            if "rev-parse" in joined and "--is-shallow-repository" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+            if "fetch" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if "rev-parse" in joined and "--verify" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if "rev-parse" in joined and "HEAD" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="aaa\n", stderr="")
+            if "rev-parse" in joined and "origin/dev" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="bbb\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"updates": {"branch": "dev"}},
+        ), patch("hermes_cli.banner._github_compare_behind", return_value=1):
+            cmd_update(SimpleNamespace(check=True, branch=None))
+
+        origin_fetches = self._origin_fetch_cmds(mock_run)
+        assert origin_fetches, "expected git fetch origin"
+        for argv in origin_fetches:
+            assert argv[argv.index("--depth") + 1] == "1"
 
 
 class TestCmdUpdateMigrationPrompt:
@@ -693,6 +788,9 @@ class TestCmdUpdateCheckBranchFlag:
             if "rev-parse" in joined and "--verify" in joined:
                 rc = 0 if verify_ok else 1
                 return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
+
+            if "rev-parse" in joined and "--is-shallow-repository" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="false\n", stderr="")
 
             if "rev-list" in joined:
                 return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")

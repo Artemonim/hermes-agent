@@ -4827,6 +4827,8 @@ _LAZY_COMMAND_EXPORTS = {
         "_invalidate_update_cache",
         "_is_android_python",
         "_is_fork",
+        "_is_shallow_repository",
+        "_shallow_fetch_depth_args",
         "_leftover_pausable_gateway_pids",
         "_log_only_write",
         "_mark_skip_upstream_prompt",

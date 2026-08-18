@@ -1782,6 +1782,33 @@ def _get_origin_url(git_cmd: list[str], cwd: Path) -> Optional[str]:
         pass
     return None
 
+def _is_shallow_repository(git_cmd: list[str], cwd: Path) -> bool:
+    """Return True when *cwd* is a shallow git checkout."""
+    result = subprocess.run(
+        git_cmd + ["rev-parse", "--is-shallow-repository"],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    return result.stdout.strip() == "true"
+
+
+def _shallow_fetch_depth_args(git_cmd: list[str], cwd: Path) -> list[str]:
+    """Return ``['--depth', '1']`` for a shallow checkout, else ``[]``.
+
+    Installer checkouts are cloned with ``--depth 1``. A bare ``git fetch``
+    either unshallows them (full history, the cost the shallow clone avoided)
+    or, when origin is itself a shallow local clone, fails with
+    ``Could not read <sha>`` / ``did not send all necessary objects`` because
+    pack-objects cannot walk the truncated graph.
+    """
+    if _m()._is_shallow_repository(git_cmd, cwd):
+        return ["--depth", "1"]
+    return []
+
+
 def _is_fork(origin_url: Optional[str]) -> bool:
     """Check if the origin remote points to a fork (not the official repo)."""
     if not origin_url:
@@ -1922,8 +1949,9 @@ def _sync_with_upstream_if_needed(git_cmd: list[str], cwd: Path) -> None:
     print()
     print("→ Fetching upstream...")
     try:
+        depth_args = _m()._shallow_fetch_depth_args(git_cmd, cwd)
         subprocess.run(
-            git_cmd + ["fetch", "upstream", "main", "--quiet"],
+            git_cmd + ["fetch"] + depth_args + ["upstream", "main", "--quiet"],
             cwd=cwd,
             capture_output=True,
             check=True,
@@ -2741,15 +2769,7 @@ def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
     # the exact cost the shallow clone avoided) and the rev-list count below
     # would then report a huge bogus "behind" number. Detect shallow up front:
     # fetch with --depth 1 to preserve the boundary and report presence-only.
-    is_shallow = (
-        subprocess.run(
-            git_cmd + ["rev-parse", "--is-shallow-repository"],
-            cwd=_m().PROJECT_ROOT,
-            capture_output=True,
-            text=True, encoding="utf-8", errors="replace",
-        ).stdout.strip()
-        == "true"
-    )
+    is_shallow = _m()._is_shallow_repository(git_cmd, _m().PROJECT_ROOT)
     depth_args = ["--depth", "1"] if is_shallow else []
 
     if branch == "main":
@@ -4846,8 +4866,12 @@ def _cmd_update_impl(args, gateway_mode: bool):
             print("  (removed stale git lock(s): %s)" % ", ".join(cleared))
 
         print("→ Fetching updates...")
+        # * Keep installer/shallow checkouts at depth 1. A bare fetch either
+        #   unshallows the tree or, with a shallow local origin, fails
+        #   (`Could not read <sha>` / `did not send all necessary objects`).
+        depth_args = _m()._shallow_fetch_depth_args(git_cmd, _m().PROJECT_ROOT)
         fetch_result = subprocess.run(
-            git_cmd + ["fetch", "origin", branch],
+            git_cmd + ["fetch"] + depth_args + ["origin", branch],
             cwd=_m().PROJECT_ROOT,
             capture_output=True,
             text=True, encoding="utf-8", errors="replace",
@@ -4983,15 +5007,7 @@ def _cmd_update_impl(args, gateway_mode: bool):
         )
         commit_count = int(result.stdout.strip())
 
-        apply_is_shallow = (
-            subprocess.run(
-                git_cmd + ["rev-parse", "--is-shallow-repository"],
-                cwd=_m().PROJECT_ROOT,
-                capture_output=True,
-                text=True, encoding="utf-8", errors="replace",
-            ).stdout.strip()
-            == "true"
-        )
+        apply_is_shallow = _m()._is_shallow_repository(git_cmd, _m().PROJECT_ROOT)
         if commit_count > 0 and apply_is_shallow:
             from hermes_cli.banner import _github_compare_behind
 
