@@ -2152,6 +2152,11 @@ DEFAULT_CONFIG = {
         # Set to true to restore delivery of child process notifications
         # (with subagent attribution lines).
         "surface_child_process_notifications": False,
+        # When false, delegate_task rejects any per-task or top-level `model`
+        # argument with a tool error. The advertised schema is unchanged
+        # (prompt-cache stability). Default true: the parent may pin a child
+        # to any model available to this Hermes instance.
+        "allow_model_override": True,
     },
 
     # Ephemeral prefill messages file — JSON list of {role, content} dicts

@@ -1032,6 +1032,19 @@ def _get_inherit_mcp_toolsets() -> bool:
     return is_truthy_value(cfg.get("inherit_mcp_toolsets"), default=True)
 
 
+def _get_allow_model_override() -> bool:
+    """Whether delegate_task may honor a per-task or top-level model override.
+
+    Runtime-only gate: the advertised schema is unchanged when this is
+    false so a mid-session config flip cannot bust the prompt cache.
+    """
+    cfg = _load_config()
+    val = cfg.get("allow_model_override", True)
+    if isinstance(val, bool):
+        return val
+    return is_truthy_value(val, default=True)
+
+
 def _is_mcp_toolset_name(name: str) -> bool:
     """Return True for canonical MCP toolsets and their registered aliases."""
     if not name:
@@ -3634,6 +3647,7 @@ def delegate_task(
     action: Optional[str] = None,
     subagent_id: Optional[str] = None,
     message: Optional[str] = None,
+    model: Optional[str] = None,
     parent_agent=None,
     credentials_cfg: Optional[Dict[str, Any]] = None,
 ) -> str:
@@ -3643,13 +3657,28 @@ def delegate_task(
 
     Spawn modes (action='spawn' or omitted):
       - Single: provide goal (+ optional context and role)
-      - Batch:  provide tasks array [{goal, context, role}, ...]
+      - Batch:  provide tasks array [{goal, context, role, model}, ...]
 
     Control modes (synchronous, never backgrounded):
       - action='list'  -> live children of this conversation's spawn tree
       - action='steer' -> queue course-correction text into a running child
                           (subagent_id + message)
       - action='stop'  -> interrupt a running child early (subagent_id)
+
+    Model resolution (fail-closed; no silent inherit):
+      per-task ``model`` > top-level ``model`` (unadvertised batch default)
+      > ``delegation.model`` config > parent inherit.
+
+    A present ``model`` key that is not a non-empty string (after strip)
+    aborts the whole call. Omit the key to inherit. A per-task or
+    top-level model is resolved through the same ``/model`` chain used
+    by the model picker. Same-provider hits inherit the parent's
+    credentials; cross-provider hits resolve a full credential bundle via
+    ``_resolve_delegation_credentials``. Unknown or unauthenticated models
+    abort the whole call before any child is spawned. Gated by
+    ``delegation.allow_model_override`` (default True). Internal
+    ``credentials_cfg`` (e.g. /review) is unchanged and is never
+    model-facing.
 
     The 'role' parameter controls whether a child can further delegate:
     'leaf' (default) cannot; 'orchestrator' retains the delegation
@@ -3724,23 +3753,29 @@ def delegate_task(
         )
     effective_max_iter = default_max_iter
 
-    # Resolve delegation credentials (provider:model pair).
-    # When delegation.provider is configured, this resolves the full credential
-    # bundle (base_url, api_key, api_mode) via the same runtime provider system
-    # used by CLI/gateway startup.  When unconfigured, returns None values so
-    # children inherit from the parent.
+    # Unadvertised top-level model is a batch default; the legacy
+    # goal→tasks[0] wrap copies it onto the single task. Per-task model
+    # wins when both are set. A present key that is not a non-empty
+    # string (after strip) fails closed — omit the argument to inherit.
     #
-    # ``credentials_cfg`` (internal callers only — never model-facing) is a
-    # per-call override shaped like the delegation config section
-    # ({provider, model, base_url, api_key, api_mode}); the /review engine
-    # uses it to route its reviewer subagent onto ``auxiliary.review``
-    # without touching the global delegation pin.
-    try:
-        creds = _resolve_delegation_credentials(
-            credentials_cfg if credentials_cfg else cfg, parent_agent
+    # * Shared ``delegation.*`` credentials resolve later, and only when at
+    # * least one task inherits (no per-task model). Tasks with a model
+    # * override resolve independently through the ``/model`` chain so a
+    # * broken ``delegation.provider`` pin cannot block a valid override.
+    if model is None:
+        top_level_model = ""
+    elif not isinstance(model, str):
+        return tool_error(
+            f"'model' must be a string, got {type(model).__name__}. "
+            "Omit 'model' to inherit the delegation config or parent model."
         )
-    except ValueError as exc:
-        return tool_error(str(exc))
+    else:
+        top_level_model = model.strip()
+        if not top_level_model:
+            return tool_error(
+                "'model' must be a non-empty string. "
+                "Omit 'model' to inherit the delegation config or parent model."
+            )
 
     # Normalize to task list
     max_children = _get_max_concurrent_children()
@@ -3771,6 +3806,8 @@ def delegate_task(
         single_task: Dict[str, Any] = {"goal": goal, "context": context, "role": top_role}
         if output_schema is not None:
             single_task["output_schema"] = output_schema
+        if top_level_model:
+            single_task["model"] = top_level_model
         task_list = [single_task]
     else:
         return tool_error(
@@ -3818,10 +3855,76 @@ def delegate_task(
             return tool_error(f"Task {i} output_schema invalid: {schema_err}")
         task_schemas.append(coerced_schema)
 
+    # * Resolve every model override before spawning. Any invalid name
+    # * aborts the whole call (zero children). Internal credentials_cfg
+    # * (the /review path) skips this overlay so its pin is unchanged.
+    n_tasks = len(task_list)
+    override_names: List[str] = []
+    if credentials_cfg is None:
+        for i, t in enumerate(task_list):
+            name, name_err = _extract_task_model_name(t, top_level_model, i)
+            if name_err:
+                return tool_error(name_err)
+            override_names.append(name)
+        if any(override_names) and not _get_allow_model_override():
+            return tool_error(
+                "Per-task model override is disabled "
+                "(delegation.allow_model_override=false). "
+                "Omit 'model' to inherit the delegation config or "
+                "parent model."
+            )
+
+    # Shared delegation creds (provider:model pair). When
+    # ``delegation.provider`` is configured this resolves the full
+    # credential bundle via the same runtime provider system used by
+    # CLI/gateway startup. When unconfigured, returns None values so
+    # children inherit from the parent.
+    #
+    # ``credentials_cfg`` (internal callers only — never model-facing) is a
+    # per-call override shaped like the delegation config section
+    # ({provider, model, base_url, api_key, api_mode}); the /review engine
+    # uses it to route its reviewer subagent onto ``auxiliary.review``
+    # without touching the global delegation pin.
+    #
+    # * Resolve shared creds only when a task still inherits: an all-override
+    # * batch must not fail because the unused ``delegation.provider`` pin
+    # * is broken. Mixed batches still require a working pin for inherit tasks.
+    needs_shared_creds = credentials_cfg is not None or (
+        not override_names or not all(override_names)
+    )
+    creds: Optional[dict] = None
+    if needs_shared_creds:
+        try:
+            creds = _resolve_delegation_credentials(
+                credentials_cfg if credentials_cfg else cfg, parent_agent
+            )
+        except ValueError as exc:
+            return tool_error(str(exc))
+
+    if credentials_cfg is not None:
+        per_task_creds: List[dict] = [creds] * n_tasks
+    elif any(override_names):
+        resolved_overrides: Dict[str, dict] = {}
+        for name in dict.fromkeys(n for n in override_names if n):
+            override_cfg = _resolve_task_model_override(name, parent_agent)
+            if isinstance(override_cfg, str):
+                return override_cfg
+            try:
+                resolved_overrides[name] = _resolve_delegation_credentials(
+                    override_cfg, parent_agent
+                )
+            except ValueError as exc:
+                return tool_error(str(exc))
+        per_task_creds = [
+            resolved_overrides[name] if name else creds
+            for name in override_names
+        ]
+    else:
+        per_task_creds = [creds] * n_tasks
+
     overall_start = time.monotonic()
     results = []
 
-    n_tasks = len(task_list)
     # Track goal labels for progress display (truncated for readability)
     task_labels = [t["goal"][:40] for t in task_list]
 
@@ -3836,8 +3939,12 @@ def delegate_task(
         wrap_progress_callback,
     )
 
+    _header_creds = per_task_creds[0] if per_task_creds else creds
     live_deleg_id, live_writers, live_paths = create_live_transcripts(
-        task_list, context, model=creds.get("model"), provider=creds.get("provider")
+        task_list,
+        context,
+        model=_header_creds.get("model"),
+        provider=_header_creds.get("provider"),
     )
 
     # Capture the ORIGINATING session's wake target BEFORE any child agent is
@@ -3879,6 +3986,7 @@ def delegate_task(
             from tools.delegation_output_schema import append_output_contract
 
             _child_context = append_output_contract(_child_context, _task_schema)
+        child_creds = per_task_creds[i] if i < len(per_task_creds) else creds
         try:
             child = _build_child_preserving_parent_tools(
                 task_index=i,
@@ -3887,18 +3995,18 @@ def delegate_task(
                 # Subagents always inherit the parent's toolsets; the model
                 # cannot choose or narrow them (no model-facing toolsets arg).
                 toolsets=None,
-                model=creds["model"],
+                model=child_creds["model"],
                 max_iterations=effective_max_iter,
                 task_count=n_tasks,
                 parent_agent=parent_agent,
-                override_provider=creds["provider"],
-                override_base_url=creds["base_url"],
-                override_api_key=creds["api_key"],
-                override_api_mode=creds["api_mode"],
-                override_request_overrides=creds.get("request_overrides"),
-                override_max_tokens=creds.get("max_output_tokens"),
-                override_acp_command=creds.get("command"),
-                override_acp_args=creds.get("args"),
+                override_provider=child_creds["provider"],
+                override_base_url=child_creds["base_url"],
+                override_api_key=child_creds["api_key"],
+                override_api_mode=child_creds["api_mode"],
+                override_request_overrides=child_creds.get("request_overrides"),
+                override_max_tokens=child_creds.get("max_output_tokens"),
+                override_acp_command=child_creds.get("command"),
+                override_acp_args=child_creds.get("args"),
                 role=effective_role,
             )
         except ValueError as exc:
@@ -4082,6 +4190,21 @@ def delegate_task(
 
             # Sort by task_index so results match input order
             results.sort(key=lambda r: r["task_index"])
+
+        # * Stamp each result with the child's post-construction model so
+        # * async completion metadata can show mixed-batch models even when
+        # * _run_single_child did not copy child.model onto the entry.
+        _child_models_by_index = {i: child for (i, _, child) in children}
+        for entry in results:
+            if not isinstance(entry, dict):
+                continue
+            existing = entry.get("model")
+            if isinstance(existing, str) and existing.strip():
+                continue
+            child = _child_models_by_index.get(entry.get("task_index"))
+            actual = _child_model_id(child) if child is not None else None
+            if actual:
+                entry["model"] = actual
 
         # Cap subagent summaries against the parent's remaining context
         # headroom (split across the batch) before they enter the parent's
@@ -4283,6 +4406,16 @@ def delegate_task(
             return tuple(parts), in_tool
 
         _goals = [t["goal"] for t in task_list]
+        _child_models = [_child_model_id(c) for c in _child_agents]
+        _named_child_models = [m for m in _child_models if m]
+        if _named_child_models:
+            # * Legacy scalar ``model`` stays a string. Mixed batches keep the
+            # * first child's id here; per-child ids travel on ``models``.
+            _batch_model = _named_child_models[0]
+        elif creds is not None:
+            _batch_model = creds.get("model")
+        else:
+            _batch_model = None
         dispatch = dispatch_async_delegation_batch(
             goals=_goals,
             context=context,
@@ -4290,7 +4423,8 @@ def delegate_task(
             # parent's toolsets (no model-facing toolsets arg).
             toolsets=None,
             role=top_role,
-            model=creds["model"],
+            model=_batch_model,
+            models=_child_models,
             session_key=_session_key,
             origin_ui_session_id=_origin_ui_session_id,
             origin_session_id=_wake_sid,
@@ -4598,6 +4732,315 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
     }
 
 
+_AVAILABLE_MODELS_ERROR_CAP = 50
+
+
+def _agent_attr_str(agent, attr: str, default: str = "") -> str:
+    """Return a string attribute from *agent*, or *default* if missing/non-str."""
+    val = getattr(agent, attr, default)
+    return val if isinstance(val, str) else default
+
+
+def _child_model_id(child) -> Optional[str]:
+    """Return the child's post-construction model id, or None."""
+    val = getattr(child, "model", None)
+    if isinstance(val, str):
+        text = val.strip()
+        if text:
+            return text
+    return None
+
+
+def _normalize_provider_slug(slug: str) -> str:
+    """Return a canonical provider slug, or a lowercased fallback."""
+    text = str(slug or "").strip()
+    if not text:
+        return ""
+    try:
+        from hermes_cli.providers import normalize_provider
+
+        return str(normalize_provider(text) or text).strip().lower()
+    except Exception:
+        return text.lower()
+
+
+def _picker_inventory_rows() -> List[dict]:
+    """Return authenticated-provider rows from the Desktop picker inventory.
+
+    Uses the same substrate as ``build_model_options_payload`` →
+    ``list_authenticated_providers``: curated static catalogs
+    (``_PROVIDER_MODELS``), TTL-cached live IDs from
+    ``provider_model_ids`` (best-effort; a network miss still leaves
+    static + configured lists), and user ``providers:`` /
+    ``custom_providers:`` model lists.
+
+    Offline-safe flags: no pricing/featured probes and no live custom
+    ``/models`` calls. Failures return an empty list rather than raising
+    into the spawn path. Model lists are not capped — membership must
+    see the full inventory, not the truncated error-message view.
+    """
+    try:
+        from hermes_cli.inventory import build_models_payload, load_picker_context
+
+        payload = build_models_payload(
+            load_picker_context(),
+            for_picker=True,
+            canonical_order=True,
+            pricing=False,
+            capabilities=False,
+            featured=False,
+            probe_custom_providers=False,
+            probe_current_custom_provider=False,
+            refresh=False,
+            max_models=None,
+        )
+    except Exception:
+        return []
+    rows = payload.get("providers") or []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _resolved_model_in_picker_inventory(provider: str, model: str) -> bool:
+    """Return True when (provider, model) is in the full picker inventory.
+
+    Membership uses every model id on the matching authenticated-provider
+    row, not the truncated error-message list. OpenRouter routing-variant
+    suffixes are request-time modifiers: when the exact id is absent, the
+    catalog base (via ``_routing_variant_catalog_base``) is checked instead.
+    The child still receives the full suffixed id.
+    """
+    # ! Known limitation: this allowlist does not cover legacy custom_providers
+    # ! slug aliases or live session-only parent state.
+    want_model = str(model or "").strip().lower()
+    if not want_model:
+        return False
+    want_provider = _normalize_provider_slug(provider)
+    if not want_provider:
+        return False
+    from hermes_cli.models import _routing_variant_catalog_base
+
+    variant_base = _routing_variant_catalog_base(
+        want_provider, str(model or "").strip()
+    )
+    variant_base_lower = variant_base.lower() if variant_base else None
+    for row in _picker_inventory_rows():
+        slug = _normalize_provider_slug(str(row.get("slug") or ""))
+        if slug != want_provider:
+            continue
+        for mid in row.get("models") or []:
+            text = str(mid).strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key == want_model:
+                return True
+            # * Catalog lists the base id; :nitro/:floor/:exacto/:online are
+            # * request-time modifiers, not separate inventory rows.
+            if variant_base_lower is not None and key == variant_base_lower:
+                return True
+    return False
+
+
+def _list_available_models_for_error() -> List[str]:
+    """Return up to 50 model ids from authenticated-provider inventory.
+
+    Used only in fail-closed error text. Failures return an empty list
+    rather than raising into the spawn path.
+    """
+    ids: List[str] = []
+    seen = set()
+    for row in _picker_inventory_rows():
+        for mid in row.get("models") or []:
+            text = str(mid).strip()
+            if not text:
+                continue
+            key = text.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            ids.append(text)
+            if len(ids) >= _AVAILABLE_MODELS_ERROR_CAP:
+                return ids
+    return ids
+
+
+def _format_unavailable_model_error(requested: str, *, detail: str = "") -> str:
+    """Build a fail-closed error that lists available models (capped)."""
+    available = _list_available_models_for_error()
+    chunks = [f"Unknown or unavailable model {requested!r}."]
+    if detail:
+        text = str(detail).strip().rstrip(".")
+        if text:
+            chunks.append(text + ".")
+    if available:
+        chunks.append("Available models: " + ", ".join(available) + ".")
+    else:
+        chunks.append(
+            "No authenticated provider models are listed. "
+            "Run 'hermes model' after adding credentials."
+        )
+    return " ".join(chunks)
+
+
+def _extract_task_model_name(
+    task: Dict[str, Any],
+    top_level_model: str,
+    task_index: int,
+) -> tuple[str, Optional[str]]:
+    """Return (model_name, error) for one task.
+
+    Per-task ``model`` beats the unadvertised top-level batch default.
+    Missing key omits the override. A present key that is not a non-empty
+    string (after strip) is an error for the whole call.
+    """
+    if "model" in task:
+        raw = task["model"]
+        if not isinstance(raw, str):
+            return (
+                "",
+                f"Task {task_index} 'model' must be a string, "
+                f"got {type(raw).__name__}. Omit 'model' to inherit "
+                "the delegation config or parent model.",
+            )
+        name = raw.strip()
+        if not name:
+            return (
+                "",
+                f"Task {task_index} 'model' must be a non-empty string. "
+                "Omit 'model' to inherit the delegation config or "
+                "parent model.",
+            )
+        return name, None
+    if top_level_model:
+        return top_level_model, None
+    return "", None
+
+
+def _resolve_task_model_override(model_name: str, parent_agent):
+    """Resolve a per-task model name via the ``/model`` chain.
+
+    Returns a credentials_cfg dict for ``_resolve_delegation_credentials``:
+    ``{"model": id}`` when the model is on the parent provider (inherit
+    creds), or ``{"provider": slug, "model": id}`` for a cross-provider
+    route.
+
+    Returns a ``tool_error`` JSON string on failure. Does not mutate
+    ``parent_agent``, config, or process globals. Imports ``hermes_cli``
+    helpers lazily to avoid an import cycle with ``tools.registry``.
+    """
+    name = str(model_name or "").strip()
+    if not name:
+        return tool_error("model override is empty.")
+
+    # * Lazy import keeps hermes_cli.model_switch off the tools.registry import path.
+    from hermes_cli.model_switch import (
+        get_authenticated_provider_slugs,
+        switch_model,
+    )
+
+    user_providers = None
+    custom_providers = None
+    try:
+        from hermes_cli.inventory import load_picker_context
+
+        ctx = load_picker_context()
+        user_providers = ctx.user_providers
+        custom_providers = ctx.custom_providers
+    except Exception:
+        user_providers = {}
+        custom_providers = []
+
+    current_provider = _agent_attr_str(parent_agent, "provider")
+    current_model = _agent_attr_str(parent_agent, "model")
+    current_base_url = _agent_attr_str(parent_agent, "base_url")
+    current_api_key = _agent_attr_str(parent_agent, "api_key")
+
+    try:
+        result = switch_model(
+            raw_input=name,
+            current_provider=current_provider,
+            current_model=current_model,
+            current_base_url=current_base_url,
+            current_api_key=current_api_key,
+            is_global=False,
+            explicit_provider="",
+            user_providers=user_providers,
+            custom_providers=custom_providers,
+        )
+    except Exception as exc:
+        return tool_error(
+            _format_unavailable_model_error(name, detail=str(exc))
+        )
+
+    if not getattr(result, "success", False):
+        return tool_error(
+            _format_unavailable_model_error(
+                name,
+                detail=getattr(result, "error_message", "") or "",
+            )
+        )
+
+    resolved_model = str(getattr(result, "new_model", "") or "").strip()
+    if not resolved_model:
+        return tool_error(
+            _format_unavailable_model_error(
+                name, detail="resolution returned an empty model id"
+            )
+        )
+    target_provider = str(getattr(result, "target_provider", "") or "").strip()
+    provider_changed = bool(getattr(result, "provider_changed", False))
+    inventory_provider = target_provider or current_provider
+
+    if provider_changed:
+        # ! Cross-provider: fail closed when the target has no credentials.
+        try:
+            authed = get_authenticated_provider_slugs(
+                current_provider=current_provider,
+                user_providers=user_providers,
+                custom_providers=custom_providers,
+            )
+        except Exception:
+            authed = []
+        try:
+            from hermes_cli.providers import normalize_provider
+
+            canon_target = normalize_provider(target_provider)
+            authed_canon = {normalize_provider(s) for s in authed if s}
+        except Exception:
+            canon_target = target_provider.strip().lower()
+            authed_canon = {(s or "").strip().lower() for s in authed if s}
+
+        if canon_target and canon_target not in authed_canon:
+            return tool_error(
+                _format_unavailable_model_error(
+                    name,
+                    detail=(
+                        f"Provider {target_provider!r} has no credentials "
+                        "on this Hermes instance"
+                    ),
+                )
+            )
+
+    # * switch_model accepts unknown IDs on custom / MiniMax / Anthropic /
+    # * Bedrock branches. The picker inventory is the allowlist.
+    if not _resolved_model_in_picker_inventory(inventory_provider, resolved_model):
+        return tool_error(
+            _format_unavailable_model_error(
+                name,
+                detail=(
+                    f"Resolved {inventory_provider}/{resolved_model} is not "
+                    "in this instance's authenticated model inventory"
+                ),
+            )
+        )
+
+    if not provider_changed:
+        # * Same provider as the parent: inherit credentials (cheap path).
+        return {"model": resolved_model}
+
+    return {"provider": target_provider, "model": resolved_model}
+
+
 def _load_config() -> dict:
     """Load delegation config from the active Hermes config.
 
@@ -4712,7 +5155,8 @@ def _build_top_level_description() -> str:
         "yourself before telling the user the operation succeeded.\n"
         + restrictions_rule +
         "- Children inherit the parent model unless pinned via "
-        "delegation.provider / delegation.model in config.yaml."
+        "delegation.provider / delegation.model in config.yaml "
+        "or an optional per-task `model`."
     )
 
 
@@ -4793,9 +5237,10 @@ DELEGATE_TASK_SCHEMA = {
         "properties": {
             # NOTE: the handler also accepts the legacy single-goal shape —
             # top-level `goal` (string), `context` (string), `output_schema`
-            # (object) — wrapped into a one-entry batch at dispatch. Legacy,
-            # unadvertised (old transcripts/callers only); tasks=[...] is the
-            # only advertised shape. Do not re-add these to the schema.
+            # (object), `model` (string, batch default) — wrapped into a
+            # one-entry batch at dispatch. Legacy, unadvertised (old
+            # transcripts/callers only); tasks=[...] is the only advertised
+            # shape. Do not re-add these to the schema.
             "tasks": {
                 "type": "array",
                 "minItems": 1,
@@ -4829,6 +5274,19 @@ DELEGATE_TASK_SCHEMA = {
                                 "schema_valid, plus schema_errors on "
                                 "failure). Keep it forgiving — require only "
                                 "fields you will read."
+                            ),
+                        },
+                        "model": {
+                            "type": "string",
+                            "description": (
+                                "Optional model override for this subagent. "
+                                "Must be a model available to this Hermes "
+                                "instance (the same inventory as the model "
+                                "picker or `hermes model`). Omit to inherit "
+                                "the delegation config pin, or the parent "
+                                "model if none is pinned. Unknown or "
+                                "unauthenticated models are rejected with "
+                                "an error that lists available models."
                             ),
                         },
                     },
@@ -4901,6 +5359,8 @@ def _model_background_value(args: dict, parent_agent=None) -> bool:
     return not is_subagent
 
 
+# * Operator-only ACP transport fields. Advertised per-task fields such as
+# * ``model`` must not be listed here.
 _MODEL_HIDDEN_TASK_FIELDS = {"acp_command", "acp_args"}
 
 
@@ -4938,6 +5398,7 @@ registry.register(
         action=args.get("action"),
         subagent_id=args.get("subagent_id"),
         message=args.get("message"),
+        model=args.get("model"),
         parent_agent=kw.get("parent_agent"),
     ),
     check_fn=check_delegate_requirements,

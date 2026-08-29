@@ -3031,6 +3031,19 @@ def _format_async_delegation(evt: dict) -> str:
             if r_goal:
                 header += f": {r_goal}"
             header += f"  (status={r_status}"
+            r_model = r.get("model")
+            if not (isinstance(r_model, str) and r_model.strip()):
+                models = evt.get("models") or []
+                if (
+                    isinstance(idx, int)
+                    and isinstance(models, list)
+                    and 0 <= idx < len(models)
+                    and isinstance(models[idx], str)
+                    and models[idx].strip()
+                ):
+                    r_model = models[idx]
+            if isinstance(r_model, str) and r_model.strip():
+                header += f", model={r_model.strip()}"
             if r.get("api_calls"):
                 header += f", api_calls={r['api_calls']}"
             if r.get("duration_seconds") is not None:

@@ -435,6 +435,8 @@ docs, i18n copies, and runtime artifacts are out of this map.
   not implemented** *(historical)*.
 - Fork-local AE2 lives in *Testing → Fork-local AE2* (`run.ps1`). There is
   no standalone AE2 doc. Do not present it as upstream.
+- `FORK.md` — fork-local change ledger: status, upstream disposition, merge
+  risk. Not an upstream Hermes contract.
 
 **Maintenance**
 - A new canonical document (source of truth, class index, or explicitly

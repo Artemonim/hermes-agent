@@ -188,9 +188,12 @@ delegation:
   provider: "openrouter"             # optional: route children to a different provider
 ```
 
-Resolution order: `delegation.base_url` (direct endpoint) takes precedence, then `delegation.provider` (full credential bundle resolved via the runtime provider system), and when neither is set children inherit the parent's provider and credentials; `delegation.model` applies in all cases, and when it is empty children inherit the parent's model.
+Two independent axes:
 
-Note that the pin is global: `delegate_task` has no per-task model parameter, so every child in a batch runs on the configured delegation model. For quality-sensitive subtasks that need a stronger model, either leave `delegation.model` unset for that session or hand the task to the [kanban board](kanban.md#per-task-model-override), which does support a per-task model override.
+- **Model selection:** per-task `model` on `delegate_task` > unadvertised top-level `model` (batch default) > `delegation.model` in config > parent model. Omit the key to inherit; a present empty or whitespace-only `model` is rejected before any child is spawned.
+- **Credentials:** when a per-call `model` override is set, credentials for that task are resolved through the `/model` chain (same-provider names inherit the parent's credentials; a model on another authenticated provider resolves that provider's credentials). `delegation.base_url` and `delegation.provider` do not apply on that branch. Without a per-call override, credentials resolve as before: `delegation.base_url` (direct endpoint) → `delegation.provider` (full runtime-provider bundle) → parent inherit. Setting just `delegation.model` without `provider` / `base_url` changes only the model name while keeping the parent's credentials.
+
+A per-task `model` must be a model available to this Hermes instance (the same inventory as the model picker / `hermes model`). Unknown or unauthenticated names abort the whole `delegate_task` call before any child is spawned. Set `delegation.allow_model_override: false` to reject these overrides (the tool schema stays unchanged). Mixed batches are allowed: each child keeps its own resolved credentials. For a durable per-task pin outside a live `delegate_task` call, the [kanban board](kanban.md#per-task-model-override) also supports a per-task model override.
 
 ## The `/review` Command
 

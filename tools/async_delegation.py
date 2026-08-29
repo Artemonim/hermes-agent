@@ -251,7 +251,7 @@ def _persist_dispatch(record: Dict[str, Any]) -> None:
     task_payload = {
         key: record.get(key)
         for key in (
-            "goal", "goals", "context", "toolsets", "role", "model", "is_batch",
+            "goal", "goals", "context", "toolsets", "role", "model", "models", "is_batch",
             # Routing origin (scope_id/user_id/user_name): persisted so a
             # restart-recovered completion can reconstruct a full
             # SessionSource — see _capture_routing_origin.
@@ -375,7 +375,8 @@ def recover_abandoned_delegations() -> int:
                 "parent_session_id": parent_id, "goal": task.get("goal", ""),
                 "goals": task.get("goals"), "context": task.get("context"),
                 "toolsets": task.get("toolsets"), "role": task.get("role"),
-                "model": task.get("model"), "is_batch": bool(task.get("is_batch")),
+                "model": task.get("model"), "models": task.get("models"),
+                "is_batch": bool(task.get("is_batch")),
                 "status": "unknown", "summary": None,
                 "error": "Delegation owner exited before recording a terminal result; outcome unknown.",
                 "dispatched_at": dispatched_at, "completed_at": now,
@@ -1036,6 +1037,7 @@ def dispatch_async_delegation_batch(
     max_async_children: int = _DEFAULT_MAX_ASYNC_CHILDREN,
     delegation_id: Optional[str] = None,
     progress_fn: Optional[Callable[[], tuple]] = None,
+    models: Optional[List[Optional[str]]] = None,
 ) -> Dict[str, Any]:
     """Dispatch a WHOLE fan-out batch as ONE background unit.
 
@@ -1072,6 +1074,7 @@ def dispatch_async_delegation_batch(
         "toolsets": list(toolsets) if toolsets else None,
         "role": role,
         "model": model,
+        "models": list(models) if models is not None else None,
         "session_key": session_key,
         "origin_ui_session_id": origin_ui_session_id,
         "origin_session_id": origin_session_id,
@@ -1195,6 +1198,7 @@ def _push_batch_completion_event(
         "toolsets": event_record.get("toolsets"),
         "role": event_record.get("role"),
         "model": event_record.get("model"),
+        "models": event_record.get("models"),
         "status": status,
         "is_batch": True,
         # The full per-task results list — the formatter renders a
@@ -1209,6 +1213,22 @@ def _push_batch_completion_event(
         "dispatched_at": dispatched_at,
         "completed_at": completed_at,
     }
+    # * Fill per-result model from the dispatch-time child list when the
+    # * runner did not stamp one (timeout/interrupt fabricated entries).
+    _record_models = event_record.get("models") or []
+    if isinstance(_record_models, list):
+        for _row in evt["results"]:
+            if not isinstance(_row, dict):
+                continue
+            existing = _row.get("model")
+            if isinstance(existing, str) and existing.strip():
+                continue
+            idx = _row.get("task_index", 0)
+            if not isinstance(idx, int) or idx < 0 or idx >= len(_record_models):
+                continue
+            stamped = _record_models[idx]
+            if isinstance(stamped, str) and stamped.strip():
+                _row["model"] = stamped
     # Routing origin captured at dispatch (see _capture_routing_origin).
     for _k in ("scope_id", "user_id", "user_name"):
         if event_record.get(_k):

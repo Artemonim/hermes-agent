@@ -3375,6 +3375,25 @@ def _openrouter_variant_base(model_id: str) -> Optional[str]:
         return base
     return None
 
+
+def _routing_variant_catalog_base(provider: Optional[str], model_id: str) -> Optional[str]:
+    """Return the catalog base id when ``provider`` treats routing-variant
+    suffixes as request-time modifiers on ``model_id``.
+
+    OpenRouter is currently the only provider that recognizes ``:nitro``,
+    ``:floor``, ``:exacto``, and ``:online``. Returns None when the
+    provider does not, or when ``model_id`` has no known suffix.
+
+    Empty ``provider`` does not inherit OpenRouter via
+    ``normalize_provider``'s default; callers must pass a real slug.
+    """
+    slug = (provider or "").strip()
+    if not slug:
+        return None
+    if normalize_provider(slug) != "openrouter":
+        return None
+    return _openrouter_variant_base(model_id)
+
 # Subscription/OAuth providers whose catalogs RE-EXPOSE other vendors' models
 # would be listed here (tried only as a last resort for bare short-alias
 # resolution, after every native-vendor catalog, so they never hijack an alias
@@ -7047,11 +7066,7 @@ def validate_requested_model(
         # and do this BEFORE fuzzy auto-correction: get_close_matches would
         # otherwise "correct" `model:nitro` → `model` and silently strip the
         # user's routing opt-in.
-        _variant_base = (
-            _openrouter_variant_base(requested_for_lookup)
-            if normalized == "openrouter"
-            else None
-        )
+        _variant_base = _routing_variant_catalog_base(normalized, requested_for_lookup)
         if _variant_base is not None and _variant_base in set(api_models):
             return {
                 "accepted": True,
@@ -7232,18 +7247,19 @@ def validate_requested_model(
         # OpenRouter routing-variant suffixes: validate the base id against
         # the catalog, keep the suffixed id (same rule as the live-listing
         # path above — variants never appear as catalog entries).
-        if normalized == "openrouter":
-            _cat_variant_base = _openrouter_variant_base(requested_for_lookup)
-            if (
-                _cat_variant_base is not None
-                and _cat_variant_base.lower() in catalog_lower
-            ):
-                return {
-                    "accepted": True,
-                    "persist": True,
-                    "recognized": True,
-                    "message": None,
-                }
+        _cat_variant_base = _routing_variant_catalog_base(
+            normalized, requested_for_lookup
+        )
+        if (
+            _cat_variant_base is not None
+            and _cat_variant_base.lower() in catalog_lower
+        ):
+            return {
+                "accepted": True,
+                "persist": True,
+                "recognized": True,
+                "message": None,
+            }
         catalog_lower_list = list(catalog_lower.keys())
         auto = get_close_matches(
             requested_for_lookup.lower(), catalog_lower_list, n=1, cutoff=0.9
