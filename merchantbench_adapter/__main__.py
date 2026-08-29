@@ -50,6 +50,45 @@ def _build_parser() -> argparse.ArgumentParser:
         help="Stop once simulation step reaches this horizon (hours)",
     )
     parser.add_argument(
+        "--max-observations",
+        type=int,
+        default=None,
+        help="Stop after this many observation/hook cycles",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=float,
+        default=60.0,
+        help="HTTP timeout in seconds for env schema/register/act calls",
+    )
+    parser.add_argument(
+        "--observation-timeout",
+        type=float,
+        default=30.0,
+        help="HTTP timeout in seconds for env observation long-polls",
+    )
+    parser.add_argument(
+        "--retry-sleep",
+        type=float,
+        default=1.0,
+        help="Seconds to sleep after a failed observation poll before retrying",
+    )
+    parser.add_argument(
+        "--provider",
+        default=None,
+        help="Hermes provider id (overrides HERMES_PROVIDER; default: openrouter)",
+    )
+    parser.add_argument(
+        "--openai-base-url",
+        default=os.environ.get("OPENAI_BASE_URL"),
+        help="OpenAI-compatible API base URL (or OPENAI_BASE_URL)",
+    )
+    parser.add_argument(
+        "--openai-api-key",
+        default=os.environ.get("OPENAI_API_KEY"),
+        help="API key (overrides OPENROUTER_API_KEY / OPENAI_API_KEY)",
+    )
+    parser.add_argument(
         "--quiet",
         action="store_true",
         help="Reduce adapter stderr logging (MerchantBench launcher passes this)",
@@ -87,6 +126,13 @@ def main(argv: list[str] | None = None) -> int:
         max_hops_per_step=args.max_hops_per_step,
         max_steps=args.max_steps,
         quiet=bool(args.quiet and not args.verbose),
+        timeout=args.timeout,
+        observation_timeout=args.observation_timeout,
+        retry_sleep=args.retry_sleep,
+        max_observations=args.max_observations,
+        provider=args.provider,
+        openai_base_url=args.openai_base_url,
+        openai_api_key=args.openai_api_key,
     )
 
 
