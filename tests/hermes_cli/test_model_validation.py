@@ -652,9 +652,13 @@ class TestValidateOpenRouterVariantSuffixes:
         result = self._validate("x-ai/notreal-model:nitro")
         assert result["accepted"] is False
 
-    def test_unknown_suffix_keeps_old_behavior(self):
+    def test_unknown_suffix_still_matches_listed_base(self):
+        """A vendor/model:suffix that is not a known OpenRouter routing
+        variant still matches the listed base. The suffixed id is kept
+        (no auto-correct to the bare base)."""
         result = self._validate("x-ai/grok-4.6:bogus")
-        assert result["accepted"] is False
+        assert result["accepted"] is True
+        assert result.get("corrected_model") is None
 
     def test_free_sku_still_direct_matched(self):
         """`:free` SKUs ARE catalog entries; direct membership handles them."""

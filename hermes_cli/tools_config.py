@@ -2584,12 +2584,12 @@ def _exempt_explicit_platform_native(
 #: Landing late — or leaving an entry here for a second release — converts a
 #: back-fill into a stuck checkbox.
 #:
-#: Not gated on a Nous sign-in here: the six ``bfl_flux3_*`` tools carry
-#: ``check_fn=check_bfl_requirements``, so an enabled toolset still ships zero
-#: schemas to a user with no Nous credential — the same split Home Assistant
-#: uses. Probing the portal from this path would put a network call on every
-#: CLI start, gateway session and cron tick.
-_RECENTLY_SHIPPED_TOOLSETS: frozenset = frozenset({"bfl", "audio"})
+#: Audio listen shipped after some saved ``platform_toolsets`` lists were
+#: frozen. ``audio_analyze`` is ``check_fn``-gated, so an enabled toolset
+#: still ships zero schemas when the check fails — the same split Home
+#: Assistant uses. Probing a remote service from this path would put a
+#: network call on every CLI start, gateway session and cron tick.
+_RECENTLY_SHIPPED_TOOLSETS: frozenset = frozenset({"audio"})
 
 
 def _enable_recently_shipped_toolsets(
