@@ -5136,8 +5136,21 @@ class TelegramAdapter(BasePlatformAdapter):
             from telegram import constants as _tg_constants
             ParseMode = _tg_constants.ParseMode
 
-        chunks = self.truncate_message(
-            content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
+        from gateway.stt_echo import chunk_telegram_stt_echo_html
+
+        # * STT echoes wrap the whole transcript in one expandable quote.
+        #   truncate_message() would split inside those tags, so continuation
+        #   messages lose the collapsed quote (or fail HTML parse). Re-wrap
+        #   each slice as its own <blockquote expandable>.
+        html_chunks = chunk_telegram_stt_echo_html(
+            content, self.MAX_MESSAGE_LENGTH, utf16_len,
+        )
+        chunks = (
+            html_chunks
+            if html_chunks is not None
+            else self.truncate_message(
+                content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
+            )
         )
         message_ids: list[str] = []
         thread_id = self._metadata_thread_id(metadata)
