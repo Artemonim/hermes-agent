@@ -17,6 +17,7 @@ from agent.audio_routing import (
     flatten_audio_parts_for_persist,
     gemini_inline_audio_from_part,
     gemini_slug_supports_native_audio,
+    looks_like_audio_content_rejection,
     mark_native_audio_in_flight,
     merge_native_media_parts,
     native_audio_in_flight,
@@ -291,3 +292,46 @@ class TestPrepareNonAudioModel:
         assert out[0]["content"][1]["type"] == "input_audio"
         assert native_audio_in_flight() is True
         clear_native_audio_in_flight()
+
+
+class TestLooksLikeAudioContentRejection:
+    """Phrase detector used by the conversation-loop audio 4xx recovery."""
+
+    def test_openrouter_and_gemini_wordings_trip(self):
+        bodies = [
+            "This model does not support audio input",
+            "Bad request: audio input is not supported by this endpoint",
+            "HTTP 404: No endpoints found that support audio",
+            "Gemini 3.5 Flash: only one audio file is allowed per request",
+            "maximum number of audio files exceeded",
+            "too many audio files in the prompt",
+        ]
+        for body in bodies:
+            assert looks_like_audio_content_rejection(body) is True, body
+
+    def test_case_insensitive(self):
+        assert looks_like_audio_content_rejection(
+            "AUDIO INPUT IS NOT SUPPORTED"
+        ) is True
+
+    def test_stale_watchdog_abort_does_not_trip(self):
+        """The live NameError trigger: a killed connection must not look
+        like an audio-capability rejection, so the loop can retry."""
+        bodies = [
+            "APIConnectionError: Connection aborted.",
+            "Inline non-streaming API call stale for 90/150s. "
+            "model=z-ai/glm-5.3-flash context=~36000 tokens. Killing connection.",
+            "Request timed out after 150s",
+            "",
+            None,
+        ]
+        for body in bodies:
+            assert looks_like_audio_content_rejection(body) is False, body
+
+    def test_image_rejection_wording_does_not_trip(self):
+        assert looks_like_audio_content_rejection(
+            "Only 'text' content type is supported."
+        ) is False
+        assert looks_like_audio_content_rejection(
+            "No endpoints found that support image input"
+        ) is False

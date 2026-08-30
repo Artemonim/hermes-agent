@@ -308,6 +308,32 @@ def messages_have_audio_parts(messages: Sequence[Any]) -> bool:
     return False
 
 
+# * Best-effort English phrases from OpenRouter / Gemini / OpenAI-compatible
+#   4xx bodies. Locale-translated or heavily reworded errors skip this guard
+#   and fall through to the normal conversation-loop retry path.
+_AUDIO_REJECTION_PHRASES = (
+    "does not support audio",
+    "audio input is not supported",
+    "no endpoints found that support audio",
+    "only one audio file",
+    "maximum number of audio files",
+    "too many audio files",
+)
+
+
+def looks_like_audio_content_rejection(error_body: Any) -> bool:
+    """Return True when a provider error says native audio input is unsupported.
+
+    Args:
+        error_body: Raw exception body, message, or ``str(error)``.
+
+    Returns:
+        True if any known audio-rejection phrase appears in the lowercased body.
+    """
+    body = str(error_body or "").lower()
+    return any(phrase in body for phrase in _AUDIO_REJECTION_PHRASES)
+
+
 def replace_audio_parts_with_placeholder(
     messages: List[Any],
     placeholder: str = AUDIO_PERSIST_PLACEHOLDER,
@@ -837,6 +863,7 @@ __all__ = [
     "gemini_inline_audio_from_part",
     "gemini_slug_supports_native_audio",
     "is_audio_part",
+    "looks_like_audio_content_rejection",
     "mark_native_audio_in_flight",
     "merge_native_media_parts",
     "messages_have_audio_parts",

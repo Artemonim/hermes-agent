@@ -64,7 +64,10 @@ from agent.message_sanitization import (
     _strip_non_ascii,
     serialized_messages_bytes,
 )
-from agent.audio_routing import replace_audio_parts_with_placeholder
+from agent.audio_routing import (
+    looks_like_audio_content_rejection,
+    replace_audio_parts_with_placeholder,
+)
 # Must mirror _STALE_TOOL_CALL_MARKER_RE in hermes_state.py — kept local
 # to avoid importing hermes_state at module load time (its module-level
 # DEFAULT_DB_PATH = get_hermes_home() / "state.db" breaks tests that
@@ -4716,16 +4719,8 @@ def run_conversation(
                     )
                     continue
 
-                _AUDIO_REJECTION_PHRASES = (
-                    "does not support audio",
-                    "audio input is not supported",
-                    "no endpoints found that support audio",
-                    "only one audio file",
-                    "maximum number of audio files",
-                    "too many audio files",
-                )
-                _looks_like_audio_rejection = any(
-                    p in _err_lower for p in _AUDIO_REJECTION_PHRASES
+                _looks_like_audio_rejection = looks_like_audio_content_rejection(
+                    _err_body
                 )
                 if _looks_like_audio_rejection and _status_ok:
                     from agent.audio_routing import clear_native_audio_in_flight

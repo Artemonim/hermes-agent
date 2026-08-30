@@ -23,6 +23,38 @@ fork only if a change needs a discussion thread.
 
 ---
 
+## 2026-08-30 — Audio-rejection NameError no longer kills the turn
+
+- **Status:** active (fork-local). Live incident the same day: five Phase-1
+  subagents died with `NameError: name '_err_lower' is not defined` after
+  a stale-watchdog abort, instead of retrying.
+- **Summary:** the native-audio 4xx recovery in
+  `agent/conversation_loop.py` compared the provider error against
+  `_err_lower` without assigning it. That line sits in the generic
+  `except Exception as api_error` handler, so **any** API exception that
+  was not an image-rejection (timeouts, connection kills, 5xx, unknown
+  4xx) raised an uncaught `NameError` and killed the session. Phrase
+  matching now lives in `looks_like_audio_content_rejection(_err_body)`
+  next to `replace_audio_parts_with_placeholder`, matching the image
+  helper. A stale-watchdog-shaped abort retries; a real audio 4xx still
+  strips `input_audio` and retries text-only.
+- **Files:** `agent/conversation_loop.py`, `agent/audio_routing.py`,
+  `tests/agent/test_audio_routing.py`,
+  `tests/run_agent/test_audio_rejection_fallback.py`.
+- **Upstream disposition:** **no-request-found.** This recovery exists
+  only because native audio is fork-local (2026-08-14 entry). Upstream
+  `main` has no `_AUDIO_REJECTION_PHRASES` block.
+  [#98419](https://github.com/NousResearch/hermes-agent/pull/98419) is
+  Telegram STT echo HTML quotes — different code, no update needed.
+- **Merge risk:** `conversation_loop.py` is high-churn. After each weekly
+  merge re-run `tests/run_agent/test_audio_rejection_fallback.py` and
+  `tests/agent/test_audio_routing.py`.
+- **Known limitations (accepted):** phrase matching is English-only
+  (same as image rejection); a translated 4xx still uses the normal
+  retry path.
+
+---
+
 ## 2026-08-30 — Desktop Update honors `updates.branch` + re-probes `--keep-stash`
 
 - **Status:** active (fork-local). Live incident the same day: in-app
@@ -142,6 +174,7 @@ fork only if a change needs a discussion thread.
   sits beside native images. Anthropic / Bedrock / Codex adapters are
   placeholders.
 - **Files:** `agent/audio_routing.py` (new; absent on `upstream/main`),
+  `agent/conversation_loop.py` (audio-rejection recovery),
   `tools/audio_tools.py` (new), `toolsets.py`, `gateway/run.py`,
   `gateway/session_state.py`, `run_agent.py`, `agent/image_routing.py`
   (`_supports_capability_override`), `agent/gemini_native_adapter.py`,
@@ -149,6 +182,7 @@ fork only if a change needs a discussion thread.
   (`_RECENTLY_SHIPPED_TOOLSETS` includes `audio`),
   `apps/desktop/src/app/settings/constants.ts`,
   `tests/agent/test_audio_routing.py`,
+  `tests/run_agent/test_audio_rejection_fallback.py`,
   `tests/tools/test_audio_analyze.py`,
   `tests/gateway/test_native_audio_buffer_isolation.py`.
 - **Upstream disposition:** **mixed — not on main; open competing PRs.**
@@ -183,6 +217,7 @@ fork only if a change needs a discussion thread.
   `image_routing.py` are high-churn. `audio_routing.py` / `audio_tools.py`
   are fork-only until upstream adds the same path. After each weekly merge
   re-run `tests/agent/test_audio_routing.py`,
+  `tests/run_agent/test_audio_rejection_fallback.py`,
   `tests/tools/test_audio_analyze.py`, and
   `tests/gateway/test_native_audio_buffer_isolation.py`.
 - **Known limitations (accepted):** one native clip per turn; native audio
