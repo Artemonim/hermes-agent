@@ -50,10 +50,12 @@ param(
     [switch]$NoMarkerCleanup,
     [switch]$SelfTestUi,
     [switch]$SelfTestPipeDrain,
+    [switch]$SelfTestKeepStashRetry,
+    [switch]$SelfTestYamlBranch,
     [switch]$SelfTestMarker
 )
 
-if (-not $SelfTestUi -and -not $SelfTestPipeDrain -and -not $InstallRoot) {
+if (-not $SelfTestUi -and -not $SelfTestPipeDrain -and -not $SelfTestKeepStashRetry -and -not $SelfTestYamlBranch -and -not $InstallRoot) {
     # Mandatory in spirit; relaxed in the signature only so the self-test
     # switches can drive the UI / the pipe drain without a checkout.
     throw "-InstallRoot is required"
@@ -859,7 +861,7 @@ public static class HermesUpdateJob {
     [DllImport("kernel32.dll")]
     private static extern bool CloseHandle(IntPtr handle);
 
-    public static StartedProcess StartAssigned(string executable, string arguments) {
+    public static StartedProcess StartAssigned(string executable, string arguments, string currentDirectory) {
         IntPtr job = IntPtr.Zero;
         IntPtr outRead = IntPtr.Zero, outWrite = IntPtr.Zero;
         IntPtr errRead = IntPtr.Zero, errWrite = IntPtr.Zero;
@@ -883,8 +885,9 @@ public static class HermesUpdateJob {
             si.StdOutput = outWrite;
             si.StdError = errWrite;
             StringBuilder commandLine = new StringBuilder("\"" + executable + "\" " + arguments);
+            string cwd = string.IsNullOrEmpty(currentDirectory) ? null : currentDirectory;
             if (!CreateProcess(executable, commandLine, IntPtr.Zero, IntPtr.Zero, true,
-                    0x00000004 | 0x08000000, IntPtr.Zero, null, ref si, out pi))
+                    0x00000004 | 0x08000000, IntPtr.Zero, cwd, ref si, out pi))
                 throw new InvalidOperationException("CreateProcess failed");
             if (!AssignProcessToJobObject(job, pi.Process)) {
                 TerminateProcess(pi.Process, 1);
@@ -971,7 +974,7 @@ function Step-PipeDrain($Reader, [ref]$Task, $Buffer, $Sink, [ref]$Moved) {
     return $false
 }
 
-function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag) {
+function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag, [string]$WorkingDirectory = "") {
     # The window does not stream child output, so no line-pump: both pipes
     # drain asynchronously (no deadlock however chatty the child) while a small
     # DoEvents loop keeps the marquee animating through long silent
@@ -1001,7 +1004,7 @@ function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag) {
         $env:PYTHONIOENCODING = "utf-8"
         $env:PYTHONUTF8 = "1"
         $env:PYTHONUNBUFFERED = "1"
-        $started = [HermesUpdateJob]::StartAssigned($Exe, $arguments)
+        $started = [HermesUpdateJob]::StartAssigned($Exe, $arguments, $WorkingDirectory)
     } finally {
         if ($null -eq $savedPythonIoEncoding) { Remove-Item Env:PYTHONIOENCODING -ErrorAction SilentlyContinue } else { $env:PYTHONIOENCODING = $savedPythonIoEncoding }
         if ($null -eq $savedPythonUtf8) { Remove-Item Env:PYTHONUTF8 -ErrorAction SilentlyContinue } else { $env:PYTHONUTF8 = $savedPythonUtf8 }
@@ -1117,6 +1120,125 @@ function Invoke-HermesStep([string]$Exe, [string[]]$HermesArgs, [string]$Tag) {
     $code = if ($stalled) { 124 } else { $proc.ExitCode }
     [HermesUpdateJob]::Close($job)
     return @{ Code = $code; Output = $all; TreeQuiesced = (-not $stalled -or $proc.HasExited); StartedAfterJobAssignment = $true }
+}
+
+function Get-ConfigYamlUpdatesBranch([string]$ConfigPath) {
+    # Indent-aware read of config.yaml `updates.branch`. Same rules as
+    # apps/desktop/electron/update-branch.ts — a `branch:` key in another
+    # section must not win. The running Desktop binary can be months stale;
+    # this script ships with the checkout, so it is the layer that can still
+    # honor YAML when Electron defaulted -Branch to main.
+    if (-not $ConfigPath -or -not (Test-Path -LiteralPath $ConfigPath)) { return $null }
+    $inUpdates = $false
+    $updatesIndent = -1
+    foreach ($line in [System.IO.File]::ReadAllLines($ConfigPath)) {
+        $lead = [regex]::Match($line, '^[ \t]*').Value
+        $indent = $lead.Length
+        $body = $line.Substring($indent)
+        $trimmed = $body.Trim()
+        if (-not $trimmed -or $trimmed.StartsWith('#')) { continue }
+        if (-not $inUpdates) {
+            if ($indent -eq 0 -and $body -match '^updates:\s*(?:#.*)?$') {
+                $inUpdates = $true
+                $updatesIndent = $indent
+            }
+            continue
+        }
+        if ($indent -le $updatesIndent) {
+            $inUpdates = $false
+            if ($indent -eq 0 -and $body -match '^updates:\s*(?:#.*)?$') {
+                $inUpdates = $true
+                $updatesIndent = $indent
+            }
+            continue
+        }
+        $value = $null
+        if ($trimmed -match '^branch:\s+"([^"]+)"\s*(?:#.*)?$') {
+            $value = $Matches[1]
+        } elseif ($trimmed -match "^branch:\s+'([^']+)'\s*(?:#.*)?$") {
+            $value = $Matches[1]
+        } elseif ($trimmed -match '^branch:\s+([^#\s]+)\s*(?:#.*)?$') {
+            $value = $Matches[1]
+        }
+        if ($null -ne $value) {
+            $value = $value.Trim()
+            if ($value) { return $value }
+            return $null
+        }
+    }
+    return $null
+}
+
+function Get-DesktopUpdatesJsonBranch([string]$JsonPath) {
+    if (-not $JsonPath -or -not (Test-Path -LiteralPath $JsonPath)) { return $null }
+    try {
+        $parsed = Get-Content -LiteralPath $JsonPath -Raw -ErrorAction Stop | ConvertFrom-Json
+        $value = [string]$parsed.branch
+        if ($value) { return $value.Trim() }
+    } catch {}
+    return $null
+}
+
+function Resolve-HandoffUpdateBranch(
+    [string]$PassedBranch,
+    [string]$ConfigYamlPath = "",
+    [string]$DesktopJsonPath = ""
+) {
+    # Same precedence as resolveDesktopUpdateBranch(): an explicit Desktop
+    # updates.json branch wins; otherwise config.yaml updates.branch;
+    # otherwise whatever Electron passed (historically the hardcoded main).
+    $desktop = Get-DesktopUpdatesJsonBranch $DesktopJsonPath
+    if ($desktop) { return $desktop }
+    $yaml = Get-ConfigYamlUpdatesBranch $ConfigYamlPath
+    if ($yaml) { return $yaml }
+    $passed = if ($PassedBranch) { $PassedBranch.Trim() } else { "" }
+    if ($passed) { return $passed }
+    return "main"
+}
+
+function Get-KeepStashFlag([string]$pythonExe, [string]$WorkingDirectory = "") {
+    # Probe the tree that is on disk RIGHT NOW. A first attempt can switch
+    # branches or pull a checkout that dropped --keep-stash; reusing a probe
+    # from before that mutation makes argparse abort the retry with exit 2.
+    # Same CreateProcess cwd as the update step: PowerShell `&` / Push-Location
+    # do not change Win32 current directory.
+    $probeArgs = @("-m", "hermes_cli.main", "update", "--help")
+    $helpRes = Invoke-HermesStep $pythonExe $probeArgs "help" $WorkingDirectory
+    if ($helpRes.Output -match "--keep-stash") {
+        return @("--keep-stash")
+    }
+    Write-HandoffLog "installed hermes predates --keep-stash; running without it"
+    return @()
+}
+
+function Get-HandoffUpdateArgs([string]$pythonExe, [string]$TargetBranch, [string]$WorkingDirectory = "") {
+    return @("-m", "hermes_cli.main", "update", "--yes", "--gateway", "--force", "--branch", $TargetBranch) + (Get-KeepStashFlag $pythonExe $WorkingDirectory)
+}
+
+function Invoke-HandoffUpdate([string]$pythonExe, [string]$TargetBranch, [string]$WorkingDirectory = "") {
+    # First attempt + one retry. Re-probe optional flags before the retry:
+    # the first run may have replaced the argparse surface (parked-branch
+    # switch, torn import after pull). argparse "unrecognized arguments:
+    # --keep-stash" is also retryable — it is not the "close all Hermes
+    # windows" exit 2 sentinel.
+    $updateArgs = Get-HandoffUpdateArgs $pythonExe $TargetBranch $WorkingDirectory
+    Write-HandoffLog ("running: python " + ($updateArgs -join " "))
+    $res = Invoke-HermesStep $pythonExe $updateArgs "update" $WorkingDirectory
+    Write-HandoffLog "hermes update exit code: $($res.Code)"
+    $argparseKeepStash = ($res.Code -eq 2) -and ($res.Output -match "unrecognized arguments:[^\r\n]*--keep-stash")
+    if (($res.Code -ne 0 -and $res.Code -ne 2) -or $argparseKeepStash) {
+        Write-HandoffLog "first attempt failed; retrying once (freshly pulled fix loads on the second run)"
+        Publish-UiProgress "Retrying update"
+        $updateArgs = Get-HandoffUpdateArgs $pythonExe $TargetBranch $WorkingDirectory
+        if ($argparseKeepStash) {
+            $updateArgs = @($updateArgs | Where-Object { $_ -ne "--keep-stash" })
+            Write-HandoffLog "retry omits --keep-stash (argparse rejected it on the first attempt)"
+        }
+        Write-HandoffLog ("retry: python " + ($updateArgs -join " "))
+        $res = Invoke-HermesStep $pythonExe $updateArgs "update" $WorkingDirectory
+        Write-HandoffLog "retry exit code: $($res.Code)"
+    }
+    return $res
 }
 
 $finalCode = 1
@@ -1357,6 +1479,94 @@ exit 3
     exit 0
 }
 
+if ($SelfTestYamlBranch) {
+    # Prove the hand-off resolves the update branch the same way as
+    # apps/desktop/electron/update-branch.ts, even when Electron passed the
+    # hardcoded default "main". The 2026-08-30 Desktop update did that while
+    # config.yaml already named `dev`.
+    $dir = Join-Path $TempDir ("hermes-yaml-branch-{0}" -f $PID)
+    New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    $yaml = Join-Path $dir "config.yaml"
+    $json = Join-Path $dir "updates.json"
+    $problems = @()
+    [System.IO.File]::WriteAllText($yaml, "model:`n  default: x`nupdates:`n  branch: dev`n  backup_keep: 5`n")
+    $got = Resolve-HandoffUpdateBranch "main" $yaml ""
+    if ($got -ne "dev") { $problems += "yaml fallback: got=$got expected=dev" }
+    [System.IO.File]::WriteAllText($json, "{`"branch`": `"main`"}`n")
+    $got = Resolve-HandoffUpdateBranch "main" $yaml $json
+    if ($got -ne "main") { $problems += "updates.json wins: got=$got expected=main" }
+    [System.IO.File]::WriteAllText($yaml, "profiles:`n  branch: other`n")
+    Remove-Item -LiteralPath $json -Force -ErrorAction SilentlyContinue
+    $got = Resolve-HandoffUpdateBranch "main" $yaml ""
+    if ($got -ne "main") { $problems += "other-section branch must not win: got=$got expected=main" }
+    Remove-Item -LiteralPath $dir -Recurse -Force -ErrorAction SilentlyContinue
+    if ($problems.Count -gt 0) {
+        Write-Host ("YAML BRANCH SELF-TEST: FAIL {0}" -f ($problems -join '; '))
+        exit 1
+    }
+    Write-Host "YAML BRANCH SELF-TEST: PASS config.yaml updates.branch wins over Desktop's default main"
+    exit 0
+}
+
+if ($SelfTestKeepStashRetry) {
+    # Prove Invoke-HandoffUpdate re-probes --keep-stash after a failed first
+    # attempt. The live 2026-08-30 Desktop update probed the flag on a `dev`
+    # tree, switched to `main` (argparse dropped the flag), then reused the
+    # original argv and died with argparse exit 2 on retry.
+    New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction SilentlyContinue | Out-Null
+    $pythonExe = $env:HERMES_SELFTEST_PYTHON
+    if (-not $pythonExe -or -not (Test-Path -LiteralPath $pythonExe)) {
+        Write-Host "KEEP-STASH RETRY SELF-TEST: FAIL no python (set HERMES_SELFTEST_PYTHON)"
+        exit 1
+    }
+    $fake = Join-Path $TempDir ("hermes-keep-stash-retry-{0}" -f $PID)
+    $pkg = Join-Path $fake "hermes_cli"
+    New-Item -ItemType Directory -Path $pkg -Force | Out-Null
+    $mainPy = @'
+import sys
+from pathlib import Path
+
+root = Path(__file__).resolve().parent.parent
+help_n = root / "help_n"
+upd_n = root / "upd_n"
+
+if "update" in sys.argv and "--help" in sys.argv:
+    n = int(help_n.read_text(encoding="utf-8")) if help_n.exists() else 0
+    n += 1
+    help_n.write_text(str(n), encoding="utf-8")
+    if n == 1:
+        print("  --keep-stash")
+    raise SystemExit(0)
+
+n = int(upd_n.read_text(encoding="utf-8")) if upd_n.exists() else 0
+n += 1
+upd_n.write_text(str(n), encoding="utf-8")
+if "--keep-stash" in sys.argv:
+    if n == 1:
+        print("ImportError: torn update", file=sys.stderr)
+        raise SystemExit(1)
+    print("unrecognized arguments: --keep-stash", file=sys.stderr)
+    raise SystemExit(2)
+raise SystemExit(0)
+'@
+    [System.IO.File]::WriteAllText((Join-Path $pkg "main.py"), $mainPy)
+    [System.IO.File]::WriteAllText((Join-Path $pkg "__init__.py"), "")
+    $res = Invoke-HandoffUpdate $pythonExe "main" $fake
+    $updCount = "0"
+    $updFile = Join-Path $fake "upd_n"
+    if (Test-Path -LiteralPath $updFile) { $updCount = (Get-Content -LiteralPath $updFile -Raw).Trim() }
+    $problems = @()
+    if ($res.Code -ne 0) { $problems += "Invoke-HandoffUpdate exit $($res.Code), expected 0" }
+    if ($updCount -ne "2") { $problems += "update calls=$updCount, expected 2" }
+    Remove-Item -LiteralPath $fake -Recurse -Force -ErrorAction SilentlyContinue
+    if ($problems.Count -gt 0) {
+        Write-Host ("KEEP-STASH RETRY SELF-TEST: FAIL {0}" -f ($problems -join '; '))
+        exit 1
+    }
+    Write-Host "KEEP-STASH RETRY SELF-TEST: PASS retry re-probed --keep-stash after the first attempt mutated the tree"
+    exit 0
+}
+
 try {
     New-Item -ItemType Directory -Path $LogDir -Force -ErrorAction SilentlyContinue | Out-Null
     Remove-Item -LiteralPath $ResultPath -Force -ErrorAction SilentlyContinue
@@ -1478,34 +1688,15 @@ try {
         Write-HandoffLog $finalMsg
         exit $finalCode
     }
-    $updateArgs = @("-m", "hermes_cli.main", "update", "--yes", "--gateway", "--force", "--branch", $Branch)
-    # --keep-stash: never re-apply local source edits after the update (they
-    # stay parked in git stash). Probe --help first: the flag ships with newer
-    # backends and an unknown flag would abort argparse with exit 2, which
-    # collides with the "close all Hermes windows" sentinel.
-    try {
-        $updateHelp = & $pythonExe -m hermes_cli.main update --help 2>$null | Out-String
-        if ($updateHelp -match "--keep-stash") {
-            $updateArgs += "--keep-stash"
-        } else {
-            Write-HandoffLog "installed hermes predates --keep-stash; running without it"
-        }
-    } catch {
-        Write-HandoffLog "could not probe update --help; running without --keep-stash"
-    }
-    Write-HandoffLog ("running: python " + ($updateArgs -join " "))
     Publish-UiProgress "Updating code and dependencies"
-    $res = Invoke-HermesStep $pythonExe $updateArgs "update"
-    Write-HandoffLog "hermes update exit code: $($res.Code)"
-
-    if ($res.Code -ne 0 -and $res.Code -ne 2) {
-        # One retry for the update-boundary class (fresh code on disk, stale
-        # code in memory). Exit 2 ("close all Hermes windows") is not retryable.
-        Write-HandoffLog "first attempt failed; retrying once (freshly pulled fix loads on the second run)"
-        Publish-UiProgress "Retrying update"
-        $res = Invoke-HermesStep $pythonExe $updateArgs "update"
-        Write-HandoffLog "retry exit code: $($res.Code)"
+    $desktopJson = Join-Path $env:APPDATA "Hermes\updates.json"
+    $yamlPath = Join-Path $HermesHome "config.yaml"
+    $resolvedBranch = Resolve-HandoffUpdateBranch $Branch $yamlPath $desktopJson
+    if ($resolvedBranch -ne $Branch) {
+        Write-HandoffLog ("handoff branch {0} (Desktop passed {1}; config.yaml / updates.json took precedence)" -f $resolvedBranch, $Branch)
+        $Branch = $resolvedBranch
     }
+    $res = Invoke-HandoffUpdate $pythonExe $Branch $InstallRoot
 
     # -- 4. Truthful completion: don't trust exit 0 -------------------------
     # `hermes update` treats a Desktop GUI build failure as NON-fatal (prints
@@ -1516,7 +1707,7 @@ try {
     if ($res.Code -eq 0 -and $res.Output -match "Desktop build failed") {
         Write-HandoffLog "hermes update reported a desktop build failure (non-fatal there, fatal here); retrying build"
         Publish-UiProgress "Rebuilding Desktop"
-        $rebuild = Invoke-HermesStep $pythonExe @("-m", "hermes_cli.main", "desktop", "--force-build", "--build-only") "rebuild"
+        $rebuild = Invoke-HermesStep $pythonExe @("-m", "hermes_cli.main", "desktop", "--force-build", "--build-only") "rebuild" $InstallRoot
         Write-HandoffLog "desktop rebuild exit code: $($rebuild.Code)"
         if ($rebuild.Code -ne 0) { $desktopBuildFailed = $true }
     }

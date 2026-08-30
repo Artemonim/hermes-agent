@@ -23,6 +23,56 @@ fork only if a change needs a discussion thread.
 
 ---
 
+## 2026-08-30 — Desktop Update honors `updates.branch` + re-probes `--keep-stash`
+
+- **Status:** active (fork-local). Live incident the same day: in-app
+  Update from Hermes Desktop failed with **exit 2** and left the install
+  on upstream `main` while this fork lives on `dev`.
+- **Summary:** two cooperating bugs. (1) Windows Desktop defaulted the
+  hand-off to `--branch main` whenever `%APPDATA%\Hermes\updates.json`
+  was missing, even though `config.yaml` already had `updates.branch:
+  dev`. Explicit `--branch` overrides YAML, so parked-branch logic
+  **switched the checkout to `main`** (tracking `upstream/main`, not
+  fork `origin`). (2) The hand-off probed `--keep-stash` on `dev`, then
+  reused that argv after the tree mutation. Upstream `main` has no
+  `--keep-stash`; argparse exited **2**, which the script treats as the
+  "close all Hermes windows" sentinel — no retry, relaunch of the old
+  GUI against the older backend, then the **Backend out of date** toast.
+  POSIX already pinned the hand-off to `HEAD`; Windows now resolves the
+  branch the same way as Desktop (`updates.json` > `config.yaml
+  updates.branch` > passed/`main`) **inside** `windows.ps1`, so a stale
+  Electron binary that still passes `-Branch main` cannot downgrade the
+  fork. Retry re-probes `--keep-stash` (and treats argparse-on-that-flag
+  as retryable, not as the exit-2 lock sentinel).
+- **Files:** `scripts/desktop-update/windows.ps1`,
+  `scripts/desktop-update/posix.sh`,
+  `apps/desktop/electron/update-branch.ts` (new),
+  `apps/desktop/electron/update-branch.test.ts` (new),
+  `apps/desktop/electron/main.ts` (`readDesktopUpdateConfig`),
+  `tests/test_desktop_update_windows_keep_stash_retry.py`,
+  `tests/test_desktop_update_shim_progress.py`.
+- **Upstream disposition:** **no-request-found** for this exact pair.
+  `--keep-stash` is fork-local (not on upstream `main`). `updates.branch`
+  is the 2026-08-10 fork entry below; Desktop never read it until this
+  change. Adjacent upstream pain: parked-branch switch + `--branch`
+  override, and the Windows hand-off treating exit 2 as non-retryable.
+- **Merge risk:** `windows.ps1` / `posix.sh` are high-churn (shim lock,
+  pipe drain, python `-m` hand-off). `main.ts` `readDesktopUpdateConfig`
+  is touched by every Desktop update-UI PR. After each weekly merge
+  re-run `tests/test_desktop_update_windows_keep_stash_retry.py`,
+  `tests/test_desktop_update_windows_pipe_drain.py`,
+  `tests/test_desktop_update_windows_python_handoff.py`, and
+  `apps/desktop` `npx vitest run --project electron electron/update-branch.test.ts`.
+- **Known limitations (accepted):** an explicit `updates.json`
+  `"branch": "main"` still wins over YAML — do not pin `main` in
+  Settings → Updates if this checkout tracks `dev`. The running Desktop
+  binary only picks up the Electron-side fallback after a Desktop
+  rebuild; until then `windows.ps1` is the guard, and it only runs from
+  the **live** install tree (`HERMES_HOME\hermes-agent`). ZIP-fallback
+  still refuses non-`main` (same as the 2026-08-10 entry).
+
+---
+
 ## 2026-08-30 — `delegate_task` per-call model override
 
 - **Status:** active (fork-local).
@@ -480,7 +530,10 @@ fork only if a change needs a discussion thread.
 - **Known limitations (accepted):** ZIP-fallback cannot use a non-`main`
   `updates.branch`. Apply `--depth 1` diverges from the maintainer-stated
   direction on #80124 / #94680; it is kept for local-clone origin
-  topology, not for GitHub.com installer clones.
+  topology, not for GitHub.com installer clones. **Desktop Update used to
+  ignore this key** (hardcoded `--branch main` when `updates.json` was
+  missing) — that is the 2026-08-30 Desktop-update entry at the top of
+  this ledger.
 
 ---
 

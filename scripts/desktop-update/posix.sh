@@ -576,24 +576,34 @@ cd "$INSTALL_ROOT" || {
 }
 export PYTHONUNBUFFERED=1
 # --keep-stash: never re-apply local source edits after the update (they stay
-# parked in git stash). Probe --help first: older installed backends don't
-# know the flag and argparse would abort with exit 2, which collides with the
-# "close all Hermes windows" sentinel.
-KEEP_STASH=""
-if "$HERMES_BIN" update --help 2>/dev/null | grep -q -- '--keep-stash'; then
-  KEEP_STASH="--keep-stash"
-else
-  log "installed hermes predates --keep-stash; running without it"
-fi
+# parked in git stash). Probe --help against the tree that is on disk RIGHT
+# NOW: a first attempt can switch branches or pull a checkout that dropped
+# the flag, and argparse would then abort the retry with exit 2 (the same
+# code as "close all Hermes windows").
+probe_keep_stash() {
+  KEEP_STASH=""
+  if "$HERMES_BIN" update --help 2>/dev/null | grep -q -- '--keep-stash'; then
+    KEEP_STASH="--keep-stash"
+  else
+    log "installed hermes predates --keep-stash; running without it"
+  fi
+}
+probe_keep_stash
 log "running: hermes update --yes --gateway $KEEP_STASH --branch $BRANCH"
 publish_stage "Updating code and dependencies"
 OUT="$("$HERMES_BIN" update --yes --gateway $KEEP_STASH --branch "$BRANCH" 2>&1)"; CODE=$?
 printf '%s\n' "$OUT" >> "$LOG" 2>/dev/null
 log "hermes update exit code: $CODE"
 
-if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 2 ]; then
+argparse_keep_stash=0
+if [ "$CODE" -eq 2 ] && printf '%s' "$OUT" | grep -q "unrecognized arguments:.*--keep-stash"; then
+  argparse_keep_stash=1
+fi
+
+if [ "$CODE" -ne 0 ] && { [ "$CODE" -ne 2 ] || [ "$argparse_keep_stash" -eq 1 ]; }; then
   # Retry once: update-boundary class (fresh code on disk, stale in memory).
-  # Exit 2 ("close all Hermes windows") is not retryable.
+  # Exit 2 ("close all Hermes windows") is not retryable UNLESS argparse
+  # rejected --keep-stash — that is a mutated tree, not a holder lock.
   #
   # A parked-branch SKIP (checkout on a feature branch with unmerged
   # commits) is also deterministic — the retry would hit the exact same
@@ -609,6 +619,12 @@ if [ "$CODE" -ne 0 ] && [ "$CODE" -ne 2 ]; then
   fi
   log "retrying once (freshly pulled fix loads on the second run)"
   publish_stage "Retrying update"
+  probe_keep_stash
+  if [ "$argparse_keep_stash" -eq 1 ]; then
+    KEEP_STASH=""
+    log "retry omits --keep-stash (argparse rejected it on the first attempt)"
+  fi
+  log "retry: hermes update --yes --gateway $KEEP_STASH --branch $BRANCH"
   OUT="$("$HERMES_BIN" update --yes --gateway $KEEP_STASH --branch "$BRANCH" 2>&1)"; CODE=$?
   printf '%s\n' "$OUT" >> "$LOG" 2>/dev/null
   log "retry exit code: $CODE"

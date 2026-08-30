@@ -130,12 +130,14 @@ exit "$(cat "$HERMES_TEST_EXITS.$n" 2>/dev/null || echo 0)"
 """
 
 
-def _run_handoff(tmp_path, exits: dict[int, int]) -> list[dict]:
+def _run_handoff(
+    tmp_path, exits: dict[int, int], *, hermes_source: str = FAKE_HERMES
+) -> list[dict]:
     """Run the real hand-off end to end; return the stage seen at each call."""
     install_root = tmp_path / "hermes-agent"
     (install_root / "venv" / "bin").mkdir(parents=True)
     hermes = install_root / "venv" / "bin" / "hermes"
-    hermes.write_text(FAKE_HERMES)
+    hermes.write_text(hermes_source)
     hermes.chmod(0o755)
 
     capture = tmp_path / "seen"
@@ -197,3 +199,45 @@ def test_retry_gate_publishes_a_distinct_stage(tmp_path):
         "Updating code and dependencies",
         "Retrying update",
     ]
+
+
+# First --help advertises --keep-stash; after the torn first update the second
+# --help does not. Reusing the original argv would make argparse exit 2.
+FAKE_HERMES_KEEP_STASH_DROPS = """#!/bin/bash
+HELP_N_FILE="${HERMES_TEST_CALLS}.help"
+case "$*" in *--help*)
+  n="$(cat "$HELP_N_FILE" 2>/dev/null || echo 0)"; n=$((n + 1))
+  printf '%s' "$n" > "$HELP_N_FILE"
+  if [ "$n" -eq 1 ]; then echo "--keep-stash"; fi
+  exit 0
+  ;;
+esac
+n="$(cat "$HERMES_TEST_CALLS" 2>/dev/null || echo 0)"; n=$((n + 1))
+printf '%s' "$n" > "$HERMES_TEST_CALLS"
+if echo " $* " | grep -q -- " --keep-stash "; then
+  if [ "$n" -eq 1 ]; then
+    echo "ImportError: torn update" >&2
+    exit 1
+  fi
+  echo "unrecognized arguments: --keep-stash" >&2
+  exit 2
+fi
+exit 0
+"""
+
+
+@requires_posix_handoff
+def test_retry_reprobes_keep_stash_after_tree_changes(tmp_path):
+    """A first attempt that mutates argparse must not reuse --keep-stash.
+
+    Desktop 2026-08-30: probe saw the flag on `dev`, parked-branch switch
+    landed on a tree without it, retry reused argv and died with argparse
+    exit 2. Re-probing before retry is the recovery.
+    """
+    _run_handoff(tmp_path, {}, hermes_source=FAKE_HERMES_KEEP_STASH_DROPS)
+    result = json.loads((tmp_path / ".hermes-update-result.json").read_text())
+    calls = int((tmp_path / "calls").read_text() or "0")
+
+    assert result["ok"] is True
+    assert result["exit_code"] == 0
+    assert calls == 2

@@ -370,6 +370,11 @@ import {
   resolveCommitLogSelection,
   shouldCountCommits
 } from './update-count'
+import {
+  DEFAULT_UPDATE_BRANCH,
+  parseUpdatesBranchFromConfigYaml,
+  resolveDesktopUpdateBranch
+} from './update-branch'
 import { waitForUpdateClearance } from './update-gate'
 import { readLiveUpdateMarker, updateHandoffConflict, writeUpdateMarker } from './update-marker'
 import { isOfficialSshRemote, OFFICIAL_REPO_HTTPS_URL } from './update-remote'
@@ -840,10 +845,6 @@ const DESKTOP_PROFILE_CONFIG_PATH = path.join(app.getPath('userData'), 'active-p
 // Mirrors hermes_cli.profiles._PROFILE_ID_RE so we never hand the backend a
 // value its profile resolver would reject and exit on.
 const PROFILE_NAME_RE = /^[a-z0-9][a-z0-9_-]{0,63}$/
-// Branch we track for self-update. The GUI work has merged to main, so this
-// tracks main. User can also override at runtime via
-// hermesDesktop.updates.setBranch().
-const DEFAULT_UPDATE_BRANCH = 'main'
 // desktop.log lives under HERMES_HOME/logs/ so it sits next to agent.log,
 // errors.log, gateway.log produced by hermes_logging.setup_logging — one log
 // directory per user, regardless of which UI surface produced the line.
@@ -2729,14 +2730,32 @@ function recentHermesLog() {
 
 // ─── Self-update (git-pull against the running backend's hermes root) ──────
 
+function readConfigYamlUpdatesBranch() {
+  try {
+    const text = fs.readFileSync(path.join(HERMES_HOME, 'config.yaml'), 'utf8')
+
+    return parseUpdatesBranchFromConfigYaml(text)
+  } catch {
+    return null
+  }
+}
+
 function readDesktopUpdateConfig() {
+  let desktopBranch = ''
+
   try {
     const parsed = JSON.parse(fs.readFileSync(DESKTOP_UPDATE_CONFIG_PATH, 'utf8'))
-    const branch = typeof parsed?.branch === 'string' ? parsed.branch.trim() : ''
-
-    return { branch: branch || DEFAULT_UPDATE_BRANCH }
+    desktopBranch = typeof parsed?.branch === 'string' ? parsed.branch.trim() : ''
   } catch {
-    return { branch: DEFAULT_UPDATE_BRANCH }
+    // Missing updates.json is the common case: fall through to config.yaml.
+  }
+
+  return {
+    branch: resolveDesktopUpdateBranch({
+      desktopConfigBranch: desktopBranch,
+      configYamlBranch: readConfigYamlUpdatesBranch(),
+      defaultBranch: DEFAULT_UPDATE_BRANCH
+    })
   }
 }
 
