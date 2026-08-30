@@ -78,6 +78,169 @@ fork only if a change needs a discussion thread.
 
 ---
 
+## 2026-08-14 — Native audio input + `audio_analyze`
+
+- **Status:** active (fork-local).
+- **Summary:** inbound voice notes and audio files can ride the native
+  `input_audio` wire when the active model can hear, instead of STT-only
+  text. `agent.audio_input_mode` is `auto` (models.dev `supports_audio` /
+  Gemini 3.5+ slug heuristic), `native`, or `text`. At most one clip is
+  attached per turn; STT transcripts stay as durable evidence; bytes are
+  stripped after persist and on provider rejection. `audio_analyze` is a
+  listen tool (native envelope or STT fallback) in a named `audio` toolset,
+  also folded into several platform cores. Gateway session-scoped buffering
+  sits beside native images. Anthropic / Bedrock / Codex adapters are
+  placeholders.
+- **Files:** `agent/audio_routing.py` (new; absent on `upstream/main`),
+  `tools/audio_tools.py` (new), `toolsets.py`, `gateway/run.py`,
+  `gateway/session_state.py`, `run_agent.py`, `agent/image_routing.py`
+  (`_supports_capability_override`), `agent/gemini_native_adapter.py`,
+  `hermes_cli/config_defaults.py`, `hermes_cli/tools_config.py`
+  (`_RECENTLY_SHIPPED_TOOLSETS` includes `audio`),
+  `apps/desktop/src/app/settings/constants.ts`,
+  `tests/agent/test_audio_routing.py`,
+  `tests/tools/test_audio_analyze.py`,
+  `tests/gateway/test_native_audio_buffer_isolation.py`.
+- **Upstream disposition:** **mixed — not on main; open competing PRs.**
+  `upstream/main` has `supports_audio_input()` metadata and STT inbound
+  (`_enrich_message_with_transcription`) but no `audio_routing.py`, no
+  `agent.audio_input_mode`, and no `audio_analyze`. Closest live effort:
+  [#90206](https://github.com/NousResearch/hermes-agent/pull/90206) (open)
+  — native gateway `input_audio` via `agent/media_routing.py`. Architectural
+  twin [#37149](https://github.com/NousResearch/hermes-agent/pull/37149)
+  (`agent/audio_routing.py`) was self-closed unmerged; API-server
+  [#18975](https://github.com/NousResearch/hermes-agent/pull/18975) used
+  the same `audio_input_mode` key and was closed as stale after an
+  api_server rewrite. `audio_analyze` exists only in
+  [#27412](https://github.com/NousResearch/hermes-agent/pull/27412) (open;
+  sweeper `keep_open` — SSRF / sync URL / base-URL issues) and
+  [#26158](https://github.com/NousResearch/hermes-agent/pull/26158)
+  (closed per maintainer request). Video got the analogue tool
+  (`video_analyze`, merged
+  [#19301](https://github.com/NousResearch/hermes-agent/pull/19301);
+  [#42145](https://github.com/NousResearch/hermes-agent/issues/42145)
+  closed `implemented_on_main`); audio did not. Adjacent, not this
+  feature: STT echo [#58859](https://github.com/NousResearch/hermes-agent/pull/58859)
+  (merged) and this fork's Telegram quote wrapping
+  [#98419](https://github.com/NousResearch/hermes-agent/pull/98419);
+  outbound TTS routing
+  [#17833](https://github.com/NousResearch/hermes-agent/pull/17833)
+  (merged). A 2026-08-30 search found **no** merged implementation of the
+  full bundle (queries: `audio_analyze`, `audio_input_mode`, `native audio`,
+  `audio_routing`). If #90206 or #27412 land, rebase onto that shape
+  rather than keeping a third routing module.
+- **Merge risk:** `gateway/run.py`, `run_agent.py`, `toolsets.py`, and
+  `image_routing.py` are high-churn. `audio_routing.py` / `audio_tools.py`
+  are fork-only until upstream adds the same path. After each weekly merge
+  re-run `tests/agent/test_audio_routing.py`,
+  `tests/tools/test_audio_analyze.py`, and
+  `tests/gateway/test_native_audio_buffer_isolation.py`.
+- **Known limitations (accepted):** one native clip per turn; native audio
+  is current-turn-only (not persisted); `video_analyze` stays opt-in and
+  this path never sends a native video container; Anthropic / Bedrock /
+  Codex native attach is unimplemented; STT echo still runs alongside
+  native attach.
+
+---
+
+## 2026-08-14 — Opt-in video frame extraction
+
+- **Status:** active (fork-local).
+- **Summary:** inbound video has no native container on this fork's main
+  turn: visuals are sampled stills (`image_url`) and the soundtrack uses
+  `agent.audio_input_mode`. `video.frame_extract` is **off by default**.
+  Empty `provider` uses a best-effort ffmpeg fallback; named
+  `video.providers.<name>` command providers mirror STT command providers
+  (write stills into `{output_dir}`, print a JSON manifest). Frames are
+  tagged `_hermes_ephemeral: video_frame`, persist as `[video]`, strip
+  after the turn, and are omitted from provider API copies.
+- **Files:** `agent/video_frame_extract.py` (new; absent on `upstream/main`),
+  `agent/agent_runtime_helpers.py`, `agent/audio_routing.py`,
+  `agent/turn_finalizer.py`, `gateway/run.py`, `gateway/session_state.py`,
+  `hermes_cli/config_defaults.py` (`video.frame_extract` / `video.providers`),
+  `tests/agent/test_video_frame_extract.py`,
+  `tests/gateway/test_native_video_frame_buffer.py`.
+- **Upstream disposition:** **mixed — exact feature never requested;
+  adjacent `video_analyze` chose the opposite design.** Merged
+  [#19301](https://github.com/NousResearch/hermes-agent/pull/19301) ships
+  `video_analyze` as whole-video `video_url` with **no ffmpeg, no frame
+  extraction**. Sweeper closed
+  [#42145](https://github.com/NousResearch/hermes-agent/issues/42145) /
+  [#41366](https://github.com/NousResearch/hermes-agent/issues/41366) as
+  `implemented_on_main`: gateway injects a cached path + note, the agent
+  must call the tool. teknium1 on #42145: "The existing implementation
+  uses native multimodal video input rather than ffmpeg frame sampling."
+  The ffmpeg-first tool PR
+  [#2294](https://github.com/NousResearch/hermes-agent/pull/2294) was
+  closed unmerged, superseded by #19301. Frame extraction is reappearing
+  only as a **`video_analyze` transport fallback** when providers reject
+  `video_url`:
+  [#72275](https://github.com/NousResearch/hermes-agent/issues/72275)
+  (open), [#82996](https://github.com/NousResearch/hermes-agent/pull/82996)
+  (open, local VLMs), [#97318](https://github.com/NousResearch/hermes-agent/pull/97318)
+  (open, dialect ladder). Adjacent, not this feature: native-video-to-main-model
+  requests [#88141](https://github.com/NousResearch/hermes-agent/issues/88141)
+  / [#49565](https://github.com/NousResearch/hermes-agent/issues/49565);
+  BFL FLUX 3 **generation** promo tools added in
+  [#74963](https://github.com/NousResearch/hermes-agent/pull/74963) and
+  removed in [#94599](https://github.com/NousResearch/hermes-agent/pull/94599).
+  A 2026-08-30 search found **no** `video.frame_extract`,
+  `video_frame_extract.py`, `_hermes_ephemeral: video_frame`, or
+  `video.providers` in issues/PRs. If #97318 lands, that is still tool-side
+  fallback, not this gateway/ephemeral still path — keep them distinct.
+- **Merge risk:** `gateway/run.py` and `turn_finalizer.py` are shared with
+  the native-audio entry. `video_frame_extract.py` is fork-only. After each
+  weekly merge re-run `tests/agent/test_video_frame_extract.py` and
+  `tests/gateway/test_native_video_frame_buffer.py`.
+- **Known limitations (accepted):** extraction is opt-in and budget-capped;
+  no native video container on the main turn; ffmpeg must be on PATH unless
+  a command provider is configured; if Telegram/gateway rejects or the
+  sampler fails, the agent still sees the path note only.
+
+---
+
+## 2026-08-14 — `AGENTS.md` doctrine / map / contracts overlay
+
+- **Status:** active (fork-local docs overlay).
+- **Summary:** this checkout's `AGENTS.md` adds four sections that
+  `upstream/main` does not have: **Short Doctrine**, **Documentation Map**,
+  **Domain Contracts**, and **Operational logs**. They compress upstream
+  invariants (cache, session toolsets, config loaders, profiles, slash
+  commands, plugins, cron durability) into cards, index canonical docs,
+  and add a `hermes logs` symptom table plus Windows
+  `%LOCALAPPDATA%\hermes` paths. Runtime behavior is unchanged. The
+  *Fork-local AE2* subsection in the same file is a separate ledger entry.
+- **Files:** `AGENTS.md` only (Documentation Map also points at this
+  `FORK.md`).
+- **Upstream disposition:** **no-request-found for the four named
+  sections; overlapping specialist docs live on the website; upstream
+  wants a smaller `AGENTS.md`, not a larger one.** Merged
+  [#81146](https://github.com/NousResearch/hermes-agent/pull/81146) added
+  `website/docs/developer-guide/codebase-ownership.md` — the closest
+  subsystem routing index, not an `AGENTS.md` Documentation Map.
+  Architecture, prompt assembly, compression/caching, gateway internals,
+  plugins, and `hermes logs` CLI flags already exist under `website/docs/`
+  / `docs/session-lifecycle.md`. Open work aims to **split or shrink**
+  `AGENTS.md` because it is loaded into session context:
+  [#52821](https://github.com/NousResearch/hermes-agent/issues/52821),
+  [#50165](https://github.com/NousResearch/hermes-agent/issues/50165),
+  [#57554](https://github.com/NousResearch/hermes-agent/pull/57554),
+  [#72450](https://github.com/NousResearch/hermes-agent/pull/72450),
+  [#63854](https://github.com/NousResearch/hermes-agent/pull/63854). A
+  2026-08-30 search found **no** `"Short Doctrine"`, `"Documentation Map"`,
+  `"Domain Contracts"` (as this index), or operational-logs symptom table
+  (queries: those phrases, `expand AGENTS.md`, `hermes logs symptom`).
+  Treat as a local overlay; do not expect it to merge as-is.
+- **Merge risk:** every weekly `main` → `dev` merge of `AGENTS.md`
+  conflicts here **and** on the Fork-local AE2 subsection. After merge,
+  keep the four overlay sections, the AE2 recipe, and the `FORK.md`
+  pointer; take upstream wording for shared sections.
+- **Known limitations (accepted):** the overlay can drift from website
+  specialist docs; it increases `AGENTS.md` size against upstream's
+  truncation concern (#52821).
+
+---
+
 ## 2026-08-12 — Telegram STT echo as a collapsed quote
 
 - **Status:** active (fork-local). Follow-up 2026-08-29 keeps the quote
@@ -110,9 +273,10 @@ fork only if a change needs a discussion thread.
   `NOT_PLANNED`). On `upstream/main` the send is still
   `🎙️ "{transcript}"` through the normal MarkdownV2 path — no
   `gateway/stt_echo.py`, no `telegram_html`, no `<blockquote expandable>`
-  on this payload. A 2026-08-30 search of NousResearch/hermes-agent
-  issues and PRs found **no** request or implementation to wrap STT
-  echoes in a collapsed quote (queries: `echo_transcripts`, `stt echo`,
+  on this payload. This fork proposed the wrapping upstream as
+  [#98419](https://github.com/NousResearch/hermes-agent/pull/98419)
+  (open, 2026-08-30). No earlier third-party request for collapsed-quote
+  STT wrapping was found (queries: `echo_transcripts`, `stt echo`,
   `collapsed quote`, `blockquote expandable` + transcript/STT/voice,
   `stt_echo`, `telegram_html`). Adjacent, not this feature:
   [#7368](https://github.com/NousResearch/hermes-agent/issues/7368) /
@@ -143,3 +307,219 @@ fork only if a change needs a discussion thread.
   full `🎙️ "…"` line. If Telegram rejects the HTML parse, the adapter
   strips tags and the collapse is lost on that fallback. Expandable
   quotes need Telegram Bot API 7.3+.
+
+---
+
+## 2026-08-11 — Flex service tier + OpenRouter `:variant` slugs
+
+- **Status:** active (fork-local). Follow-up 2026-08-30 (`d7b2a48b0c`)
+  keeps unknown `:suffix` accepted when the listed base matches.
+- **Summary:** `agent.service_tier` understands OpenRouter/OpenAI-compatible
+  `flex` as well as `priority` (`fast`/`on` stay aliases for `priority`).
+  `parse_service_tier` / `strip_model_variant_suffix` live in
+  `hermes_constants.py`. `resolve_service_tier_overrides` gives OpenRouter
+  `flex`/`priority` without the fast-model gate; other providers keep the
+  gated mapping. `_effective_request_overrides` applies the tier in
+  `build_api_kwargs` for every API entry point. Auxiliary tasks gain
+  shortcuts `service_tier` and `providers` (OpenRouter provider-order).
+  Catalog validation, `/model`, custom-provider matching, and reasoning
+  overrides accept `vendor/model:variant` slugs.
+- **Files:** `hermes_constants.py`, `hermes_cli/models.py`,
+  `hermes_cli/model_switch.py`, `agent/auxiliary_client.py`,
+  `agent/chat_completion_helpers.py`, `agent/agent_init.py`, `cli.py`,
+  `gateway/run.py`, `tui_gateway/server.py`,
+  `hermes_cli/config_defaults.py`, `hermes_cli/cli_agent_setup_mixin.py`,
+  `tests/test_hermes_constants.py`, `tests/agent/test_auxiliary_client.py`,
+  `tests/cli/test_fast_command.py`, `tests/gateway/test_fast_command.py`,
+  `tests/hermes_cli/test_model_validation.py`,
+  `website/docs/user-guide/configuration.md`,
+  `website/docs/user-guide/features/provider-routing.md`.
+- **Upstream disposition:** **mixed — variant whitelist merged; flex
+  tier and unknown-suffix acceptance are not.** Merged
+  [#94103](https://github.com/NousResearch/hermes-agent/pull/94103)
+  teaches `/model` that `:nitro`/`:floor`/`:exacto`/`:online` are
+  request-time modifiers on a listed base; **unknown suffixes stay
+  rejected** (teknium1: "unknown suffixes and unknown bases are still
+  rejected"). That is OpenRouter-only `_openrouter_variant_base`, not
+  `strip_model_variant_suffix`. On main, `agent.service_tier` +
+  `resolve_fast_mode_overrides` is **priority-only**; `flex` is warned
+  and ignored. Flex is an open cluster: teknium1 on
+  [#16335](https://github.com/NousResearch/hermes-agent/pull/16335)
+  rejected a parallel `api_service_tier` key — "Adding `flex` is
+  naturally just one more accepted value on the same key";
+  [#37059](https://github.com/NousResearch/hermes-agent/pull/37059)
+  (open) follows that shape for OpenAI + Gemini;
+  [#12700](https://github.com/NousResearch/hermes-agent/issues/12700)
+  (open) is the Gemini request;
+  [#5157](https://github.com/NousResearch/hermes-agent/pull/5157)
+  (open) is the older broad service-tier PR;
+  [#83398](https://github.com/NousResearch/hermes-agent/pull/83398)
+  (open) is TUI tier propagation (priority on current main). Adjacent:
+  [#97820](https://github.com/NousResearch/hermes-agent/issues/97820) /
+  [#97839](https://github.com/NousResearch/hermes-agent/pull/97839)
+  (open) — strip routing suffixes before models.dev lookup. A 2026-08-30
+  search found **no** `parse_service_tier`,
+  `resolve_service_tier_overrides`, or `_effective_request_overrides` on
+  main. `_routing_variant_catalog_base` (delegate-model entry) overlaps
+  this file; do not conflate them. If #37059 lands, drop the fork parser
+  in favor of upstream's extended `_parse_service_tier_config` and keep
+  only the unknown-suffix divergence if still wanted.
+- **Merge risk:** `hermes_cli/models.py` is shared with the delegate-model
+  entry and with merged #94103. `gateway/run.py` / `cli.py` service-tier
+  loaders churn. After each weekly merge re-run
+  `tests/hermes_cli/test_model_validation.py`,
+  `tests/test_hermes_constants.py`, and the CLI/gateway `test_fast_command`
+  files.
+- **Known limitations (accepted):** unknown `:suffix` against a listed
+  base is accepted here and **rejected on upstream** (#94103). Auxiliary
+  `providers` is OpenRouter-only. ZIP/docs still describe flex as
+  OpenRouter/OpenAI-compatible, not a guarantee every provider honors it.
+
+---
+
+## 2026-08-11 — MerchantBench Hermes adapter
+
+- **Status:** active (fork-local). Follow-up 2026-08-29 brings `/act`
+  env parity (trace cursor, sibling env calls, usage capture, history
+  sanitization).
+- **Summary:** in-tree `merchantbench_adapter/` is a public reconstruction
+  of the unpublished SDK contract MerchantBench's Hermes launcher expects:
+  env tools registered into Hermes, forwarded via `/act`, with
+  `end_of_step`, HTTP 425 stale steps, observation retries, and
+  `max_observations` shutdown. A persistent `AIAgent` loop consumes
+  observations; OpenRouter identity headers (`HTTP-Referer`, `X-Title`)
+  can show MerchantBench on the dashboard
+  (`OPENROUTER_HTTP_REFERER` / `OPENROUTER_X_TITLE`). `run_agent.py` also
+  adds `google/gemini-3` and `stealth/` to reasoning-prefix fallback.
+- **Files:** `merchantbench_adapter/` (`__init__.py`, `__main__.py`,
+  `bridge.py`, `history.py`, `runtime.py`, `usage_capture.py`),
+  `tests/test_merchantbench_adapter.py`, `run_agent.py` (reasoning
+  prefixes), `REPO_CULTURE_HERMES.md` (research note only).
+- **Upstream disposition:** **no-request-found for MerchantBench itself;
+  custom OpenRouter attribution via env vars was explicitly dropped.** A
+  2026-08-30 search of NousResearch/hermes-agent issues, PRs, and code
+  found **zero** hits for `merchantbench`, `MerchantBench`,
+  `end_of_step`, `max_observations`, `OPENROUTER_HTTP_REFERER`, or
+  `OPENROUTER_X_TITLE`. Adjacent OpenRouter branding: merged
+  [#1105](https://github.com/NousResearch/hermes-agent/pull/1105) /
+  [#20282](https://github.com/NousResearch/hermes-agent/pull/20282)
+  (salvage of [#13649](https://github.com/NousResearch/hermes-agent/pull/13649);
+  **dropped the env-var override** per ".env is for secrets only" —
+  "If that feature is wanted later, it should come back under
+  `openrouter.title` / `openrouter.referer` in config.yaml");
+  [#61732](https://github.com/NousResearch/hermes-agent/pull/61732)
+  reapplies headers after `/model`. Config-based header merge is still
+  open as [#21588](https://github.com/NousResearch/hermes-agent/issues/21588);
+  fix PRs [#21590](https://github.com/NousResearch/hermes-agent/pull/21590)
+  / [#22485](https://github.com/NousResearch/hermes-agent/pull/22485)
+  closed unmerged. Generic environment-adapter SDK
+  [#93305](https://github.com/NousResearch/hermes-agent/issues/93305) was
+  closed into research index
+  [#93319](https://github.com/NousResearch/hermes-agent/issues/93319)
+  (`needs-decision`, no implementation). Keep the adapter fork-local;
+  do not upstream `OPENROUTER_*` env vars.
+- **Merge risk:** the package is fork-only (conflict only if upstream
+  adds a same-named tree). `run_agent.py` reasoning-prefix edits sit on
+  a hot file. After each weekly merge re-run
+  `tests/test_merchantbench_adapter.py`.
+- **Known limitations (accepted):** reconstructed unpublished contract —
+  MerchantBench launcher changes can break it without a Hermes signal.
+  Dashboard branding uses env vars that upstream already refused for
+  Hermes itself; they apply only inside this adapter process.
+
+---
+
+## 2026-08-10 — `hermes update`: `updates.branch` + shallow apply fetch
+
+- **Status:** active (fork-local). Follow-up 2026-08-18 keeps apply-path
+  fetches at `--depth 1` on shallow checkouts and covers that with tests
+  that stay off the npm/backup path.
+- **Summary:** two update-pipeline patches for this checkout. (1)
+  `updates.branch` in `config.yaml` (default `main`) is the target when
+  `hermes update` omits `--branch`; explicit `--branch` still wins;
+  ZIP-fallback still refuses non-`main`. (2) Shared shallow helpers
+  `_is_shallow_repository` / `_shallow_fetch_depth_args` so apply-path
+  `git fetch origin <branch>` matches the check path. A bare fetch
+  against a shallow **local** origin fails with `Could not read SHA` /
+  `did not send all necessary objects` (this tree is often
+  `G:/GitHubImports/Hermes`).
+- **Files:** `hermes_cli/main.py` (`_resolve_update_branch`),
+  `hermes_cli/update_cmd.py`, `hermes_cli/subcommands/update.py`,
+  `hermes_cli/config_defaults.py` (`updates.branch`),
+  `tests/hermes_cli/test_cmd_update.py`.
+- **Upstream disposition:** **(1) proposed once, closed unmerged, no
+  maintainer thread. (2) same apply-path `--depth 1` idea was closed as
+  implemented-on-main via a different mechanism; current upstream
+  direction argues against `--depth 1` fetches.** Identical
+  `updates.branch` PR
+  [#44422](https://github.com/NousResearch/hermes-agent/pull/44422)
+  (jakehewitt) was self-closed 2026-06-25 with zero reviews. Adjacent
+  fork-deploy pain:
+  [#72789](https://github.com/NousResearch/hermes-agent/issues/72789)
+  (open) — update banner when `origin` ≠ upstream or default branch ≠
+  `main`. For shallow: check path on main still inlines `--depth 1`;
+  apply path is still a **bare** `git fetch`.
+  [#80124](https://github.com/NousResearch/hermes-agent/pull/80124)
+  proposed adding `--depth 1` to apply (same as this fork);
+  teknium1 closed it pointing at merged
+  [#86318](https://github.com/NousResearch/hermes-agent/pull/86318)
+  (compare-API count recovery, not depth on apply): "rather than adding
+  `--depth 1` to the apply fetch." Open
+  [#94477](https://github.com/NousResearch/hermes-agent/issues/94477) /
+  [#94680](https://github.com/NousResearch/hermes-agent/pull/94680)
+  argue `--depth 1` **poisons** the shallow boundary and that putting it
+  on apply "would make the breakage permanent" (Halldrix). This fork
+  keeps apply `--depth 1` because the failure mode here is a shallow
+  *local origin* (`Could not read SHA`), which #86318 does not address.
+  A 2026-08-30 search found **no** `_shallow_fetch_depth_args` /
+  `_is_shallow_repository` helpers on main. Revisit (2) if #94680 lands.
+- **Merge risk:** `hermes_cli/update_cmd.py` is one of the hottest files
+  in the weekly merge. Conflict hotspots: `_resolve_update_branch`, the
+  apply-path `git fetch origin` argv, and the check-path shallow block.
+  After each weekly merge re-run `tests/hermes_cli/test_cmd_update.py`.
+- **Known limitations (accepted):** ZIP-fallback cannot use a non-`main`
+  `updates.branch`. Apply `--depth 1` diverges from the maintainer-stated
+  direction on #80124 / #94680; it is kept for local-clone origin
+  topology, not for GitHub.com installer clones.
+
+---
+
+## 2026-08-10 — Fork-local AE2 local CI pipeline
+
+- **Status:** active (fork-local tooling).
+- **Summary:** `run.ps1` is the public entry; `build.ps1` orchestrates
+  fast/full profiles, stage caching, and AE2-style `report.json`.
+  `scripts/ci/ae2_local.py` runs Python stages (`changed`, `lint`,
+  `typecheck`, `compile`) and reuses upstream
+  `scripts/ci/classify_changes.py` for lane selection. Canonical Python
+  tests still go through `scripts/run_tests.sh`; frontend through
+  `npm run check`. This is **not** an upstream Hermes contract — see
+  `AGENTS.md` *Fork-local AE2*.
+- **Files:** `run.ps1`, `build.ps1`, `scripts/ci/ae2_local.py`,
+  `tests/test_ae2_local.py`, `.gitignore` (`.ci_cache/`, `.enforcer/`,
+  `.temporary/`), `AGENTS.md` (Fork-local AE2 subsection only).
+- **Upstream disposition:** **no-request-found.** A 2026-08-30 search
+  found **zero** issues/PRs for `AgentEnforcer`, `AgentEnforcer2`,
+  `ae2_local`, root `run.ps1` / `build.ps1` CI, `.ci_cache`, or
+  `.enforcer/` as a cache dir. Upstream standardizes on
+  `scripts/run_tests.sh` ([#11577](https://github.com/NousResearch/hermes-agent/pull/11577)
+  merged; open [#83388](https://github.com/NousResearch/hermes-agent/pull/83388)
+  refuses bare `pytest`). Closest adjacent ask is a **Windows test
+  launcher only**:
+  [#84437](https://github.com/NousResearch/hermes-agent/issues/84437) /
+  [#84546](https://github.com/NousResearch/hermes-agent/pull/84546)
+  (open `scripts/run_tests.ps1`). OS CI lanes
+  [#77992](https://github.com/NousResearch/hermes-agent/pull/77992)
+  (merged) are GitHub Actions, not a local orchestrator. No maintainer
+  rejection of AE2 specifically — it was never proposed. Do not
+  upstream this stack; if #84546 lands, keep calling `run_tests.sh` (or
+  that PS1) rather than duplicating hermetic isolation.
+- **Merge risk:** `AGENTS.md` is shared with the doctrine-overlay entry.
+  `scripts/ci/classify_changes.py` is upstream — consume it, do not
+  fork it. After each weekly merge re-run `tests/test_ae2_local.py` and
+  a `./run.ps1 -Fast -SkipLaunch` smoke if the classifier or
+  `run_tests.sh` changed.
+- **Known limitations (accepted):** the fast profile runs only changed
+  Python test files and does not infer tests from production-source
+  changes. It never replaces task-specific `scripts/run_tests.sh`
+  verification.
