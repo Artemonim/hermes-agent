@@ -19245,14 +19245,24 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # while allowing quiet STT for users who only want the agent to
                 # receive the transcription.
                 if _successful_transcripts and self._should_echo_stt_transcripts():
+                    from gateway.stt_echo import format_stt_transcript_echo, stt_echo_metadata
+
                     _echo_adapter = self._adapter_for_source(source)
-                    _echo_meta = self._thread_metadata_for_source(source, self._reply_anchor_for_event(event))
+                    _echo_meta = stt_echo_metadata(
+                        getattr(source, "platform", None),
+                        self._thread_metadata_for_source(
+                            source, self._reply_anchor_for_event(event),
+                        ),
+                    )
                     if _echo_adapter:
                         for _tx in _successful_transcripts:
                             try:
                                 await _echo_adapter.send(
                                     source.chat_id,
-                                    f'🎙️ "{_tx}"',
+                                    format_stt_transcript_echo(
+                                        _tx,
+                                        getattr(source, "platform", None),
+                                    ),
                                     metadata=_echo_meta,
                                 )
                             except Exception as _echo_exc:
@@ -26053,15 +26063,21 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             or adapter is None
         ):
             return
+        from gateway.stt_echo import format_stt_transcript_echo, stt_echo_metadata
+
         already_echoed = int(getattr(event, "_gateway_pending_stt_echoed", 0) or 0)
         unsent = transcripts[already_echoed:]
         setattr(event, "_gateway_pending_stt_echoed", already_echoed + len(unsent))
+        echo_meta = stt_echo_metadata(getattr(source, "platform", None), metadata)
         for tx in unsent:
             try:
                 await adapter.send(
                     source.chat_id,
-                    f'🎙️ "{tx}"',
-                    metadata=metadata,
+                    format_stt_transcript_echo(
+                        tx,
+                        getattr(source, "platform", None),
+                    ),
+                    metadata=echo_meta,
                 )
             except Exception as echo_exc:
                 logger.debug("%s echo failed (non-fatal): %s", log_context, echo_exc)

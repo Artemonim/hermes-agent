@@ -5287,6 +5287,86 @@ class TelegramAdapter(BasePlatformAdapter):
         else:  # "first" (default)
             return chunk_index == 0
 
+    async def _send_html_message(
+        self,
+        chat_id: str,
+        content: str,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+    ) -> SendResult:
+        """Send preformatted HTML without MarkdownV2 conversion.
+
+        Used for STT expandable transcript quotes and other callers that already
+        emit Telegram HTML (``<blockquote expandable>``, escaped entities, …).
+        Falls back to plain text if Telegram rejects the HTML parse.
+        """
+        try:
+            from telegram.constants import ParseMode
+        except ImportError:
+            from telegram import constants as _tg_constants
+            ParseMode = _tg_constants.ParseMode
+
+        chunks = self.truncate_message(
+            content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
+        )
+        message_ids: list[str] = []
+        thread_id = self._metadata_thread_id(metadata)
+
+        for i, chunk in enumerate(chunks):
+            reply_to_id = None
+            if self._should_thread_reply(reply_to, i):
+                reply_to_id = self._reply_to_message_id_for_send(
+                    reply_to, metadata, reply_to_mode=self._reply_to_mode,
+                )
+            thread_kwargs = self._thread_kwargs_for_send(
+                chat_id,
+                thread_id,
+                metadata,
+                reply_to_message_id=reply_to_id,
+                reply_to_mode=self._reply_to_mode,
+            )
+            kwargs: Dict[str, Any] = {
+                "chat_id": normalize_telegram_chat_id(chat_id),
+                "text": chunk,
+                "parse_mode": ParseMode.HTML,
+                "reply_to_message_id": reply_to_id,
+                **thread_kwargs,
+                **self._link_preview_kwargs(),
+                **self._notification_kwargs(metadata),
+            }
+            try:
+                msg = await self._send_message_with_thread_fallback(**kwargs)
+            except Exception as html_err:
+                err_lower = str(html_err).lower()
+                if "parse" in err_lower or "entity" in err_lower or "html" in err_lower:
+                    logger.warning(
+                        "[%s] HTML parse failed, falling back to plain text: %s",
+                        self.name, html_err,
+                    )
+                    plain = (
+                        chunk.replace("<blockquote expandable>", "")
+                        .replace("<blockquote>", "")
+                        .replace("</blockquote>", "")
+                    )
+                    plain = re.sub(r"<[^>]+>", "", plain)
+                    plain = _html.unescape(plain)
+                    kwargs["text"] = plain
+                    kwargs["parse_mode"] = None
+                    msg = await self._send_message_with_thread_fallback(**kwargs)
+                else:
+                    raise
+            message_ids.append(str(msg.message_id))
+
+        if not (metadata or {}).get("notify"):
+            try:
+                await self.send_typing(chat_id, metadata=metadata)
+            except Exception:
+                pass
+        return SendResult(
+            success=True,
+            message_id=message_ids[0] if message_ids else None,
+        )
+
     async def send(
         self,
         chat_id: str,
@@ -5318,6 +5398,13 @@ class TelegramAdapter(BasePlatformAdapter):
         # Skip whitespace-only text to prevent Telegram 400 empty-text errors.
         if not content or not content.strip():
             return SendResult(success=True, message_id=None)
+
+        # Preformatted HTML (e.g. STT expandable transcript quotes) must skip
+        # MarkdownV2 conversion — bold/italic passes would destroy the tags.
+        if (metadata or {}).get("telegram_html"):
+            return await self._send_html_message(
+                chat_id, content, reply_to=reply_to, metadata=metadata,
+            )
         
         try:
             # Bot API 10.1 rich fast-path: send the raw agent markdown via
