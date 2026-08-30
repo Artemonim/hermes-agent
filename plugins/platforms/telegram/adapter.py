@@ -5324,20 +5324,44 @@ class TelegramAdapter(BasePlatformAdapter):
         )
         message_ids: list[str] = []
         thread_id = self._metadata_thread_id(metadata)
+        private_dm_topic_send = self._is_private_dm_topic_send(
+            chat_id, thread_id, metadata,
+        )
+        # * Same targeting as send() / _try_send_rich. Early HTML return must
+        #   not skip the DM-topic fail-closed contract (missing reply anchor or
+        #   a dead topic must not leak the echo into the general chat).
+        routing = self._compute_single_send_routing(
+            chat_id, reply_to, metadata, thread_id,
+        )
+        if routing is None:
+            return SendResult(
+                success=False,
+                error=self._dm_topic_missing_anchor_error(),
+                retryable=False,
+            )
+        routed_reply_to_id, routed_thread_kwargs = routing
+        dm_topic_created = bool(
+            metadata and metadata.get("telegram_dm_topic_created_for_send")
+        )
+        fail_closed_topic = private_dm_topic_send or dm_topic_created
 
         for i, chunk in enumerate(chunks):
-            reply_to_id = None
-            if self._should_thread_reply(reply_to, i):
-                reply_to_id = self._reply_to_message_id_for_send(
-                    reply_to, metadata, reply_to_mode=self._reply_to_mode,
+            if private_dm_topic_send:
+                reply_to_id = routed_reply_to_id
+                thread_kwargs = routed_thread_kwargs
+            else:
+                reply_to_id = None
+                if self._should_thread_reply(reply_to, i):
+                    reply_to_id = self._reply_to_message_id_for_send(
+                        reply_to, metadata, reply_to_mode=self._reply_to_mode,
+                    )
+                thread_kwargs = self._thread_kwargs_for_send(
+                    chat_id,
+                    thread_id,
+                    metadata,
+                    reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode,
                 )
-            thread_kwargs = self._thread_kwargs_for_send(
-                chat_id,
-                thread_id,
-                metadata,
-                reply_to_message_id=reply_to_id,
-                reply_to_mode=self._reply_to_mode,
-            )
             kwargs: Dict[str, Any] = {
                 "chat_id": normalize_telegram_chat_id(chat_id),
                 "text": chunk,
@@ -5348,7 +5372,19 @@ class TelegramAdapter(BasePlatformAdapter):
                 **self._notification_kwargs(metadata),
             }
             try:
-                msg = await self._send_message_with_thread_fallback(**kwargs)
+                if fail_closed_topic:
+                    try:
+                        msg = await self._bot.send_message(**kwargs)
+                    except Exception as send_err:
+                        if self._is_thread_not_found_error(send_err):
+                            return SendResult(
+                                success=False,
+                                error=str(send_err),
+                                retryable=False,
+                            )
+                        raise
+                else:
+                    msg = await self._send_message_with_thread_fallback(**kwargs)
             except Exception as html_err:
                 err_lower = str(html_err).lower()
                 if "parse" in err_lower or "entity" in err_lower or "html" in err_lower:
@@ -5365,7 +5401,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     plain = _html.unescape(plain)
                     kwargs["text"] = plain
                     kwargs["parse_mode"] = None
-                    msg = await self._send_message_with_thread_fallback(**kwargs)
+                    if fail_closed_topic:
+                        msg = await self._bot.send_message(**kwargs)
+                    else:
+                        msg = await self._send_message_with_thread_fallback(**kwargs)
                 else:
                     raise
             message_ids.append(str(msg.message_id))
