@@ -75,3 +75,71 @@ fork only if a change needs a discussion thread.
   scope for this fork's surfaces (Telegram Gateway, Hermes Desktop, OpenRouter;
   Gemini works via the static catalog). Marked in code with
   `# ! Known limitation` at the inventory check.
+
+---
+
+## 2026-08-12 — Telegram STT echo as a collapsed quote
+
+- **Status:** active (fork-local). Follow-up 2026-08-29 keeps the quote
+  intact when a long transcript is split across Telegram's length cap.
+- **Summary:** inbound voice STT is still echoed when
+  `stt.echo_transcripts` is true (that toggle is upstream). On Telegram
+  the echo is an HTML expandable blockquote
+  (`<blockquote expandable>…</blockquote>`) so the transcript sits in a
+  collapsed quote instead of a full `🎙️ "…"` line; other platforms keep
+  the classic line. The body is HTML-escaped and sent with
+  `metadata["telegram_html"]` so MarkdownV2 never sees the transcript
+  (markdown characters in speech cannot break parse, and the `**>`
+  expandable-quote path is not used). Chunks longer than Telegram's
+  budget are re-wrapped so every continuation is still a complete
+  collapsed quote, with `(N/M)` outside the tags.
+- **Files:** `gateway/stt_echo.py` (new; absent on `upstream/main`),
+  `plugins/platforms/telegram/adapter.py` (`telegram_html` →
+  `_send_html_message`, STT-aware HTML chunking), `gateway/run.py`
+  (both echo send sites), `hermes_cli/config_defaults.py` (comment
+  only), `website/docs/user-guide/configuration.md`,
+  `tests/gateway/test_stt_echo_format.py`,
+  `tests/gateway/test_telegram_format.py`,
+  `tests/gateway/test_telegram_voice_v0_regressions.py`.
+- **Upstream disposition:** **echo exists; collapsed-quote wrapping does
+  not.** The visible transcript echo and `stt.echo_transcripts` landed
+  via [#58859](https://github.com/NousResearch/hermes-agent/pull/58859)
+  (salvage of #58697 + #53038); request
+  [#9656](https://github.com/NousResearch/hermes-agent/issues/9656) is
+  closed by sweeper as `implemented_on_main` (GitHub `stateReason`:
+  `NOT_PLANNED`). On `upstream/main` the send is still
+  `🎙️ "{transcript}"` through the normal MarkdownV2 path — no
+  `gateway/stt_echo.py`, no `telegram_html`, no `<blockquote expandable>`
+  on this payload. A 2026-08-30 search of NousResearch/hermes-agent
+  issues and PRs found **no** request or implementation to wrap STT
+  echoes in a collapsed quote (queries: `echo_transcripts`, `stt echo`,
+  `collapsed quote`, `blockquote expandable` + transcript/STT/voice,
+  `stt_echo`, `telegram_html`). Adjacent, not this feature:
+  [#7368](https://github.com/NousResearch/hermes-agent/issues/7368) /
+  [#7369](https://github.com/NousResearch/hermes-agent/pull/7369)
+  (open) — collapsible quote for **reasoning**, not transcripts;
+  [#9605](https://github.com/NousResearch/hermes-agent/pull/9605)
+  (merged) — MarkdownV2 `**> … ||` expandable quotes in
+  `format_message()`;
+  [#90773](https://github.com/NousResearch/hermes-agent/issues/90773) /
+  [#90781](https://github.com/NousResearch/hermes-agent/pull/90781)
+  (open) — that MarkdownV2 `**>` marker is eaten by bold conversion,
+  which is why this fork sends HTML instead;
+  [#86040](https://github.com/NousResearch/hermes-agent/pull/86040)
+  (open) — reply-anchor the agent answer onto the echo message;
+  [#87396](https://github.com/NousResearch/hermes-agent/pull/87396)
+  (open) — per-platform echo on/off. A [#9656](https://github.com/NousResearch/hermes-agent/issues/9656)
+  comment calls the plain `🎙️ "…"` echo noisy; that is the UX this
+  wrapping addresses, but upstream asked for a kill-switch, not a
+  collapsed quote.
+- **Merge risk:** `gateway/run.py` echo sites (immediate + pending) and
+  `plugins/platforms/telegram/adapter.py` `send()` / HTML path are
+  high-churn. `gateway/stt_echo.py` is fork-only — conflict only if
+  upstream adds the same path. After each weekly merge re-run
+  `tests/gateway/test_stt_echo_format.py`,
+  `tests/gateway/test_telegram_format.py`, and
+  `tests/gateway/test_telegram_voice_v0_regressions.py`.
+- **Known limitations (accepted):** non-Telegram platforms still get the
+  full `🎙️ "…"` line. If Telegram rejects the HTML parse, the adapter
+  strips tags and the collapse is lost on that fallback. Expandable
+  quotes need Telegram Bot API 7.3+.
