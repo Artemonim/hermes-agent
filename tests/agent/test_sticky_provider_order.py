@@ -1,14 +1,19 @@
-"""Opt-in sticky OpenRouter/Nous provider pin and failure rotation."""
+"""Opt-in sticky OpenRouter provider pin and failure rotation."""
 
+import logging
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import pytest
+
+import agent.sticky_provider_order as sticky_provider_order
 from agent.chat_completion_helpers import (
     _provider_preferences_for_agent,
     handle_max_iterations,
 )
 from agent.error_classifier import FailoverReason, classify_api_error
 from agent.sticky_provider_order import (
+    apply_sticky_order_to_preferences,
     apply_sticky_retry_budget,
     begin_sticky_logical_request,
     bind_sticky_order,
@@ -48,6 +53,7 @@ def _agent(
     provider="openrouter",
     base_url="https://openrouter.ai/api/v1",
     api_mode="chat_completions",
+    model="google/gemini-flash",
     require_parameters=False,
     data_collection=None,
 ):
@@ -57,7 +63,7 @@ def _agent(
         provider=provider,
         base_url=base_url,
         api_mode=api_mode,
-        model="google/gemini-flash",
+        model=model,
         providers_order=order,
         providers_allowed=only,
         providers_ignored=ignore,
@@ -133,6 +139,18 @@ class TestStickyOrderDefaultOff:
         assert prefs["order"] == ["z-ai/fp8"]
         assert "allow_fallbacks" not in prefs
 
+    def test_enabled_false_emits_no_sticky_fields(self):
+        agent = _agent(
+            order=["z-ai/fp8", "novita/fp8"],
+            only=["z-ai/fp8"],
+            sticky={"enabled": False},
+        )
+        prefs = _provider_preferences_for_agent(agent)
+        assert sticky_is_live(agent) is False
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert prefs["only"] == ["z-ai/fp8"]
+        assert "allow_fallbacks" not in prefs
+
 
 class TestStickyOrderPin:
     def test_enabled_pins_first_slug_and_disables_fallbacks(self):
@@ -142,7 +160,7 @@ class TestStickyOrderPin:
         assert prefs["allow_fallbacks"] is False
         assert "only" not in prefs
 
-    def test_only_intersection_narrows_only_key(self):
+    def test_only_intersection_preserves_only_key(self):
         agent = _agent(
             order=["z-ai/fp8", "novita/fp8"],
             only=["novita/fp8", "other"],
@@ -151,7 +169,7 @@ class TestStickyOrderPin:
         assert agent._sticky_provider_order.pool == ["novita/fp8"]
         prefs = _provider_preferences_for_agent(agent)
         assert prefs["order"] == ["novita/fp8"]
-        assert prefs["only"] == ["novita/fp8"]
+        assert prefs["only"] == ["novita/fp8", "other"]
         assert prefs["allow_fallbacks"] is False
 
     def test_empty_intersection_disables_sticky(self, caplog):
@@ -515,11 +533,82 @@ class TestStickyOrderRouteGate:
         assert sticky_is_live(agent) is False
         assert sticky_retry_floor(agent) is None
 
-    def test_nous_chat_completions_still_pins(self):
+    def test_nous_chat_completions_is_not_live(self):
         agent = _agent(
             provider="nous",
             base_url="https://inference-api.nousresearch.com/v1",
             api_mode="chat_completions",
+            sticky={"enabled": True},
+        )
+        assert sticky_is_live(agent) is False
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    @pytest.mark.parametrize(
+        "provider,base_url",
+        [
+            ("nous", "https://inference-api.nousresearch.com/v1"),
+            ("nous-portal", "https://openrouter.ai/api/v1"),
+            ("nousresearch", "https://openrouter.ai/api/v1"),
+            ("openrouter", "https://nousresearch.com/v1"),
+            ("openrouter", "https://inference-api.nousresearch.com/v1"),
+        ],
+    )
+    def test_nous_spellings_and_hosts_are_not_live(self, provider, base_url):
+        agent = _agent(
+            provider=provider,
+            base_url=base_url,
+            order=["z-ai/fp8", "novita/fp8"],
+            only=["z-ai/fp8"],
+            sticky={"enabled": True},
+        )
+        prefs = _provider_preferences_for_agent(agent)
+        assert sticky_is_live(agent) is False
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert prefs["only"] == ["z-ai/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_custom_provider_on_openrouter_url_is_not_live(self):
+        agent = _agent(
+            provider="custom",
+            base_url="https://openrouter.ai/api/v1",
+            order=["z-ai/fp8", "novita/fp8"],
+            only=["z-ai/fp8"],
+            sticky={"enabled": True},
+        )
+        prefs = _provider_preferences_for_agent(agent)
+        assert sticky_is_live(agent) is False
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert prefs["only"] == ["z-ai/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_custom_colon_endpoint_is_not_live(self):
+        agent = _agent(
+            provider="custom:minimax",
+            base_url="https://openrouter.ai/api/v1",
+            sticky={"enabled": True},
+        )
+        prefs = _provider_preferences_for_agent(agent)
+        assert sticky_is_live(agent) is False
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_openrouter_provider_is_live_and_pins_wire_prefs(self):
+        agent = _agent(
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            sticky={"enabled": True},
+        )
+        assert sticky_is_live(agent) is True
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["z-ai/fp8"]
+        assert prefs["allow_fallbacks"] is False
+
+    def test_legacy_openrouter_url_without_provider_is_live(self):
+        agent = _agent(
+            provider="",
+            base_url="https://api.openrouter.ai/api/v1",
             sticky={"enabled": True},
         )
         assert sticky_is_live(agent) is True
@@ -552,6 +641,7 @@ class TestStickyOrderRouteGate:
             provider="openrouter",
             base_url="https://openrouter.ai/api/v1",
             api_mode="chat_completions",
+            model="model-a",
             provider_sort=None,
             provider_require_parameters=False,
             provider_data_collection=None,
@@ -571,9 +661,11 @@ class TestStickyOrderRouteGate:
         assert rotate(agent._sticky_provider_order, "timeout") is True
         assert agent._sticky_provider_order.active_index == 1
 
+        agent.model = "model-b"
         apply_provider_routing_to_agent(agent, routing, "model-b")
         assert agent.providers_order == ["other-1", "other-2", "other-3"]
         assert agent._sticky_provider_order.pool == ["other-1", "other-2", "other-3"]
+        assert agent._sticky_provider_order.bound_model == "model-b"
         assert agent._sticky_provider_order.active_index == 0
         prefs = _provider_preferences_for_agent(agent)
         assert prefs["order"] == ["other-1"]
@@ -842,7 +934,7 @@ class TestStickyOrderPoolWalkIntegration:
 
     def test_idle_between_two_conversations_returns_to_pool_zero(self):
         clock = _Clock(1000.0)
-        agent, _primary, fallback_model, _pool = _sticky_walk_agent(
+        agent, primary, fallback_model, _pool = _sticky_walk_agent(
             sticky={"enabled": True, "ttl_seconds": 1},
             clock=clock,
         )
@@ -850,6 +942,9 @@ class TestStickyOrderPoolWalkIntegration:
         first = _timeout_walk_conversation(agent, fallback_model, captured)
         assert first["completed"] is True
         assert agent._sticky_provider_order.active_index == 2
+        # * The timeout walk activates model fallback. Restore the bound
+        # model so this case is idle-TTL, not a model-mismatch no-op.
+        agent.model = primary
         clock.t += 5.0
         begin_sticky_logical_request(agent)
         prefs = _provider_preferences_for_agent(agent)
@@ -961,6 +1056,38 @@ class TestStickyOrderSummaryPath:
         prefs = _provider_preferences_for_agent(agent)
         assert prefs["order"] == [pool[1]]
         assert prefs["allow_fallbacks"] is False
+
+    def test_escalated_priority_tier_is_on_summary_call(self):
+        from agent.service_tier_escalation import bind_service_tier_escalation
+
+        agent, _pool = _summary_sticky_agent(sticky={"enabled": True})
+        agent.service_tier = "flex"
+        agent.request_overrides = {}
+        bind_service_tier_escalation(
+            agent,
+            {
+                "enabled": True,
+                "ttft_threshold_seconds": 8.0,
+                "consecutive_slow_requests": 1,
+            },
+        )
+        agent._service_tier_escalation.effective_tier = "priority"
+
+        captured_kwargs = []
+
+        def fake_create(**kwargs):
+            captured_kwargs.append(kwargs)
+            return _conversation_response("Summary")
+
+        agent.client.chat.completions.create.side_effect = fake_create
+        result = handle_max_iterations(
+            agent,
+            [{"role": "user", "content": "do stuff"}],
+            1,
+        )
+        assert result == "Summary"
+        assert captured_kwargs
+        assert captured_kwargs[0].get("service_tier") == "priority"
 
     def test_non_live_summary_tick_does_not_extend_ttl(self):
         """A summary after /model to anthropic_messages must not keep the pin warm."""
@@ -1112,3 +1239,366 @@ class TestStickyOrderSummaryPath:
         assert "error" in result.lower()
         assert "timed out" in result
         assert agent._sticky_provider_order.active_index == 0
+
+
+class TestStickyOrderPrecedence:
+    def test_only_without_active_slug_leaves_preferences_unchanged(self):
+        agent = _agent(sticky={"enabled": True})
+        original = {
+            "only": ["other-provider"],
+            "order": ["z-ai/fp8", "novita/fp8"],
+        }
+        prefs = apply_sticky_order_to_preferences(agent, original)
+        assert prefs is original
+        assert prefs["only"] == ["other-provider"]
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_only_containing_active_slug_keeps_only_and_pins(self):
+        agent = _agent(
+            order=["z-ai/fp8", "novita/fp8"],
+            only=["z-ai/fp8", "extra"],
+            sticky={"enabled": True},
+        )
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["only"] == ["z-ai/fp8", "extra"]
+        assert prefs["order"] == ["z-ai/fp8"]
+        assert prefs["allow_fallbacks"] is False
+
+    def test_empty_pool_does_not_emit_pin(self):
+        agent = _agent(order=[], sticky={"enabled": True})
+        original = {"sort": "throughput"}
+        prefs = apply_sticky_order_to_preferences(agent, dict(original))
+        assert prefs == original
+        assert "order" not in prefs
+        assert "allow_fallbacks" not in prefs
+        assert sticky_is_live(agent) is False
+
+
+class TestStickyOrderPreset:
+    def test_preset_suffix_model_is_not_live(self):
+        agent = _agent(
+            sticky={"enabled": True},
+            model="google/gemini-flash@preset/my-preset",
+        )
+        assert sticky_is_live(agent) is False
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_bare_preset_model_is_not_live(self):
+        agent = _agent(sticky={"enabled": True}, model="@preset/coding")
+        assert sticky_is_live(agent) is False
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_nitro_variant_is_not_live(self):
+        agent = _agent(
+            sticky={"enabled": True},
+            model="google/gemini-flash:nitro",
+        )
+        assert sticky_is_live(agent) is False
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_floor_variant_is_not_live(self):
+        agent = _agent(
+            sticky={"enabled": True},
+            model="google/gemini-flash:floor",
+        )
+        assert sticky_is_live(agent) is False
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_online_and_free_variants_stay_live(self):
+        for suffix in (":online", ":free", ":exacto"):
+            agent = _agent(
+                sticky={"enabled": True},
+                model=f"google/gemini-flash{suffix}",
+            )
+            assert sticky_is_live(agent) is True
+            prefs = _provider_preferences_for_agent(agent)
+            assert prefs["order"] == ["z-ai/fp8"]
+            assert prefs["allow_fallbacks"] is False
+
+
+class TestNitroFloorOrderWarning:
+    """Configured order + :nitro/:floor warns once; wire order is unchanged."""
+
+    @pytest.fixture(autouse=True)
+    def _reset_warn_once(self):
+        sticky_provider_order._nitro_floor_order_warned = False
+        yield
+        sticky_provider_order._nitro_floor_order_warned = False
+
+    def test_nitro_configured_order_warns_once_without_mutating_wire(self, caplog):
+        agent = _agent(
+            sticky={"enabled": True},
+            model="google/gemini-flash:nitro",
+            order=["z-ai/fp8", "novita/fp8"],
+        )
+        with caplog.at_level(logging.WARNING, logger="run_agent"):
+            prefs1 = _provider_preferences_for_agent(agent)
+            prefs2 = _provider_preferences_for_agent(agent)
+        assert prefs1["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert prefs2["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs1
+        warnings = [
+            record
+            for record in caplog.records
+            if "tier-admission" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+
+    def test_nitro_without_order_does_not_warn(self, caplog):
+        agent = _agent(
+            sticky={"enabled": True},
+            model="google/gemini-flash:nitro",
+            order=[],
+        )
+        with caplog.at_level(logging.WARNING, logger="run_agent"):
+            prefs = _provider_preferences_for_agent(agent)
+        assert "order" not in prefs
+        assert not any(
+            "tier-admission" in record.getMessage() for record in caplog.records
+        )
+
+    def test_nitro_order_with_tier_slug_does_not_warn(self, caplog):
+        agent = _agent(
+            sticky={"enabled": True},
+            model="google/gemini-flash:nitro",
+            order=["openai/priority"],
+        )
+        with caplog.at_level(logging.WARNING, logger="run_agent"):
+            prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["openai/priority"]
+        assert not any(
+            "tier-admission" in record.getMessage() for record in caplog.records
+        )
+
+    def test_non_openrouter_nitro_order_does_not_consume_latch(self, caplog):
+        other = _agent(
+            sticky={"enabled": True},
+            model="google/gemini-flash:nitro",
+            order=["z-ai/fp8", "novita/fp8"],
+            provider="nous",
+            base_url="https://inference-api.nousresearch.com/v1",
+        )
+        with caplog.at_level(logging.WARNING, logger="run_agent"):
+            other_prefs = _provider_preferences_for_agent(other)
+        assert other_prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert sticky_provider_order._nitro_floor_order_warned is False
+        assert not any(
+            "tier-admission" in record.getMessage() for record in caplog.records
+        )
+
+        openrouter = _agent(
+            sticky={"enabled": True},
+            model="google/gemini-flash:nitro",
+            order=["z-ai/fp8", "novita/fp8"],
+        )
+        with caplog.at_level(logging.WARNING, logger="run_agent"):
+            or_prefs = _provider_preferences_for_agent(openrouter)
+        assert or_prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert sticky_provider_order._nitro_floor_order_warned is True
+        warnings = [
+            record
+            for record in caplog.records
+            if "tier-admission" in record.getMessage()
+        ]
+        assert len(warnings) == 1
+
+
+class TestStickyOrderModelBinding:
+    def test_model_change_without_rebind_is_not_live(self):
+        agent = _agent(sticky={"enabled": True}, model="google/gemini-flash")
+        assert sticky_is_live(agent) is True
+        agent.model = "google/gemini-flash:online"
+        assert sticky_is_live(agent) is False
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["z-ai/fp8", "novita/fp8"]
+        assert "allow_fallbacks" not in prefs
+
+    def test_rebind_on_new_model_is_live(self):
+        agent = _agent(sticky={"enabled": True}, model="google/gemini-flash")
+        agent.model = "qwen/qwen3.8-27b"
+        assert sticky_is_live(agent) is False
+        bind_sticky_order(
+            agent,
+            {"order": agent.providers_order, "sticky_order": {"enabled": True}},
+        )
+        assert agent._sticky_provider_order.bound_model == "qwen/qwen3.8-27b"
+        assert sticky_is_live(agent) is True
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["z-ai/fp8"]
+        assert prefs["allow_fallbacks"] is False
+
+    def test_two_agents_do_not_share_pins(self):
+        first = _agent(
+            order=["a", "b"],
+            sticky={"enabled": True},
+            model="model-a",
+        )
+        second = _agent(
+            order=["x", "y"],
+            sticky={"enabled": True},
+            model="model-b",
+        )
+        rotate(first._sticky_provider_order, "timeout")
+        assert _provider_preferences_for_agent(first)["order"] == ["b"]
+        assert _provider_preferences_for_agent(second)["order"] == ["x"]
+        assert first._sticky_provider_order is not second._sticky_provider_order
+        assert first._sticky_provider_order.active_slug == "b"
+        assert second._sticky_provider_order.active_slug == "x"
+
+    def test_disk_sticky_config_without_providers_order_is_not_active(self):
+        """Curator-shaped bind: disk sticky_order.enabled but no providers_*.
+
+        agent_init copies provider_routing from disk onto
+        ``_provider_routing_config`` and binds, but the pool is built from
+        ``agent.providers_order`` / ``providers_allowed``. An empty pool
+        leaves sticky disabled even when the flag is on.
+        """
+        agent = SimpleNamespace(
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_mode="chat_completions",
+            model="google/gemini-flash",
+            providers_order=None,
+            providers_allowed=None,
+            providers_ignored=None,
+            provider_sort=None,
+            provider_require_parameters=False,
+            provider_data_collection=None,
+        )
+        bind_sticky_order(
+            agent,
+            {
+                "order": ["z-ai/fp8", "novita/fp8"],
+                "sticky_order": {"enabled": True},
+            },
+        )
+        assert agent._sticky_provider_order.enabled is True
+        assert agent._sticky_provider_order.pool == []
+        assert agent._sticky_provider_order.is_active is False
+        assert sticky_is_live(agent) is False
+        prefs = _provider_preferences_for_agent(agent)
+        assert "order" not in prefs
+        assert "allow_fallbacks" not in prefs
+
+    def test_apply_matching_model_keeps_bound_and_pool_aligned(self):
+        agent = SimpleNamespace(
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_mode="chat_completions",
+            model="google/gemini-flash",
+            provider_sort=None,
+            provider_require_parameters=False,
+            provider_data_collection=None,
+        )
+        routing = {
+            "order": ["flat-a", "flat-b"],
+            "sticky_order": {"enabled": True},
+            "models": {
+                "google/gemini-flash": {"order": ["overlay-x", "overlay-y"]},
+                "other-model": {"order": ["other-1", "other-2"]},
+            },
+        }
+        apply_provider_routing_to_agent(agent, routing, "google/gemini-flash")
+        state = agent._sticky_provider_order
+        assert state.bound_model == "google/gemini-flash"
+        assert state.pool == ["overlay-x", "overlay-y"]
+        assert sticky_is_live(agent) is True
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["overlay-x"]
+        assert prefs["allow_fallbacks"] is False
+
+    def test_apply_explicit_model_binds_that_model_even_if_agent_differs(self):
+        agent = SimpleNamespace(
+            provider="openrouter",
+            base_url="https://openrouter.ai/api/v1",
+            api_mode="chat_completions",
+            model="google/gemini-flash",
+            provider_sort=None,
+            provider_require_parameters=False,
+            provider_data_collection=None,
+        )
+        routing = {
+            "order": ["flat-a", "flat-b"],
+            "sticky_order": {"enabled": True},
+            "models": {
+                "google/gemini-flash": {"order": ["overlay-x", "overlay-y"]},
+                "other-model": {"order": ["other-1", "other-2"]},
+            },
+        }
+        apply_provider_routing_to_agent(agent, routing, "other-model")
+        state = agent._sticky_provider_order
+        assert state.bound_model == "other-model"
+        assert state.pool == ["other-1", "other-2"]
+        assert agent.model == "google/gemini-flash"
+        assert sticky_is_live(agent) is False
+        prefs = _provider_preferences_for_agent(agent)
+        assert prefs["order"] == ["other-1", "other-2"]
+        assert "allow_fallbacks" not in prefs
+
+
+class TestStickyOrderAuxiliaryContract:
+    def test_auxiliary_client_call_llm_does_not_apply_sticky_pin(self):
+        """Light auxiliary_client.call_llm tasks never get the sticky pin.
+
+        Cron and subagents that pass providers_order still bind a pool.
+        Curator constructs AIAgent without providers_* so its pool is
+        empty and sticky is not active — out of this call_llm test.
+        """
+        from agent.auxiliary_client import call_llm
+        from agent.sticky_provider_order import apply_sticky_order_to_preferences as apply_fn
+
+        client = MagicMock()
+        client.base_url = "https://openrouter.ai/api/v1"
+        response = MagicMock()
+        client.chat.completions.create.return_value = response
+
+        config = {
+            "provider_routing": {
+                "order": ["z-ai/fp8", "novita/fp8"],
+                "sticky_order": {"enabled": True},
+            },
+            "auxiliary": {
+                "session_search": {
+                    "provider": "openrouter",
+                    "model": "google/gemini-3.5-flash-lite",
+                    "providers": ["google-ai-studio/flex", "novita/fp8"],
+                }
+            },
+        }
+
+        with (
+            patch("hermes_cli.config.load_config", return_value=config),
+            patch("hermes_cli.config.load_config_readonly", return_value=config),
+            patch(
+                "agent.auxiliary_client._get_cached_client",
+                return_value=(client, "google/gemini-3.5-flash-lite"),
+            ),
+            patch(
+                "agent.auxiliary_client._effective_provider_for_client",
+                return_value="openrouter",
+            ),
+            patch(
+                "agent.sticky_provider_order.apply_sticky_order_to_preferences",
+                wraps=apply_fn,
+            ) as sticky_apply,
+        ):
+            result = call_llm(
+                task="session_search",
+                messages=[{"role": "user", "content": "hello"}],
+            )
+
+        assert result is response
+        sticky_apply.assert_not_called()
+        kwargs = client.chat.completions.create.call_args.kwargs
+        provider = kwargs["extra_body"]["provider"]
+        assert provider["order"] == ["google-ai-studio/flex", "novita/fp8"]
+        assert "allow_fallbacks" not in provider

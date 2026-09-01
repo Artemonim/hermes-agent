@@ -1749,15 +1749,70 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
     return result
 
 
+def provider_routing_model_ids_match(key, request) -> bool:
+    """True when overlay *key* applies to the requested model id.
+
+    Asymmetric (left is a ``models.`` key, right is the live model id):
+
+    - exact API ids match
+    - a variant request (``base:suffix``) matches a base key
+    - a variant request does not match a different variant key
+      (``:floor`` ≠ ``:nitro``)
+    - a base request does not match a variant key
+    - same-vendor spelling variants match only among base slugs, so
+      ``google/x`` is never treated as ``openai/x``
+    """
+    a = str(key or "").strip()
+    b = str(request or "").strip()
+    if a == b:
+        return True
+    if not a or not b:
+        return False
+    a_base = strip_model_variant_suffix(a)
+    b_base = strip_model_variant_suffix(b)
+    a_variant = a_base != a
+    # * Distinct SKUs: :floor key must not apply to a :nitro request,
+    # and a :free key must not apply to a base request.
+    if a_variant:
+        return False
+    if a_base == b_base:
+        return True
+    a_vendor = a_base.split("/", 1)[0] if "/" in a_base else ""
+    b_vendor = b_base.split("/", 1)[0] if "/" in b_base else ""
+    if a_vendor != b_vendor:
+        return False
+    return a_base in _canonical_model_variants(b_base)
+
+
+def _provider_routing_overlay_for_model(overlay_root: dict, model: str):
+    """Return the ``models.<key>`` overlay dict for *model*, or None.
+
+    Exact key wins. A variant request may fall back to a base key; it
+    never inherits another variant SKU's overlay.
+    """
+    model_key = str(model or "")
+    if not model_key:
+        return None
+    exact = overlay_root.get(model_key)
+    if isinstance(exact, dict):
+        return exact
+    for key, value in overlay_root.items():
+        if not isinstance(value, dict):
+            continue
+        if provider_routing_model_ids_match(str(key), model_key):
+            return value
+    return None
+
+
 def resolve_provider_routing_for_model(routing, model: str = "") -> dict:
     """Return wire-ready provider routing for *model* (no ``models`` key).
 
     Flat keys on ``provider_routing`` are the defaults. When ``models`` has an
-    exact-match entry for *model* (the API model id string), each listed
-    overlay key replaces the corresponding flat key independently; omitted
-    overlay keys fall through to the flat value. ``models`` itself is never
-    part of the result — it is not a valid OpenRouter ``extra_body.provider``
-    field.
+    entry for *model* (exact API id, then a variant request falling back to
+    a base key — never another variant SKU), each listed overlay key
+    replaces the corresponding flat key independently; omitted overlay keys
+    fall through to the flat value. ``models`` itself is never part of the
+    result — it is not a valid OpenRouter ``extra_body.provider`` field.
     """
     if not isinstance(routing, dict):
         return {}
@@ -1768,7 +1823,7 @@ def resolve_provider_routing_for_model(routing, model: str = "") -> dict:
     model_key = str(model or "")
     if not model_key:
         return resolved
-    overlay = overlay_root.get(model_key)
+    overlay = _provider_routing_overlay_for_model(overlay_root, model_key)
     if not isinstance(overlay, dict):
         return resolved
     for overlay_key, overlay_value in overlay.items():
@@ -1811,7 +1866,7 @@ def apply_provider_routing_to_agent(agent, routing, model: str = "") -> dict:
     try:
         from agent.sticky_provider_order import bind_sticky_order
 
-        bind_sticky_order(agent, resolve_provider_routing_for_model(raw, model))
+        bind_sticky_order(agent, resolve_provider_routing_for_model(raw, model), model=model)
     except Exception:
         pass
     return kwargs

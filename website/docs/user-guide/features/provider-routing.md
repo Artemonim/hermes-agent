@@ -84,6 +84,8 @@ provider_routing:
     - "amazon-bedrock"
 ```
 
+Combining `:nitro` or `:floor` on the model id with `provider_routing.order` disables that variant's tier-admission. OpenRouter replaces the variant sort with your explicit `order`, so priority/flex endpoints are no longer admitted automatically. Hermes still sends `order` unchanged — the combination is valid when you list a tier-suffixed slug such as `openai/priority`, `openai/fast`, or `google-vertex/flex`. Sticky pin is not applied to `:nitro` / `:floor` models for the same reason.
+
 ### `require_parameters`
 
 When `true`, OpenRouter will only route to providers that support **all** parameters in your request (like `temperature`, `top_p`, `tools`, etc.). This avoids silent parameter drops.
@@ -197,7 +199,7 @@ provider_routing:
 
 | Event | What happens |
 |-------|----------------|
-| Timeout, overload, or server error (5xx) | Rotate; the retry (if the error is retryable) goes to the next slug. Every slug is attempted before eager model fallback |
+| Timeout, overload, or server error (5xx) | Rotate. On the main conversation, a retryable error retries the same logical request on the next slug. Every slug is attempted before eager model fallback. A session-summary failure rotates the pin so the *next* request tries the next slug; the failed summary is not retried immediately |
 | Rate limit (429) or empty/invalid response | Stay on the current slug. Normal retry / model-fallback still applies — these errors do not walk the pin pool |
 | Every slug has failed with timeout / overload / 5xx | Eager transport-failure model fallback may fire (not before the last slug has failed) |
 | Idle longer than `ttl_seconds` between requests | Reset to the first slug (every provider's cache is already cold). In-request retry backoff does not count as idle |
@@ -205,11 +207,23 @@ provider_routing:
 
 If `order ∩ only` is empty, `sticky_order` silently disables with a warning in the log.
 
-The pin applies on CLI, gateway, TUI, Desktop, cron, and subagents. Batch gets it only when `providers_order` is passed explicitly (batch does not read `provider_routing` from config). Per-model overlay applies on CLI, messaging gateway, TUI, and Desktop; cron uses the flat `order` from config. State is per-agent. Only the OpenRouter / Nous Portal **chat-completions** path is active; any other `api_mode` (`anthropic_messages`, `codex_responses`, and future modes) and direct provider connections are a no-op.
+The pin applies on full-agent paths that actually resolve a sticky pool (`providers_order` / `only`): the main conversation, session summary, subagents, cron, and batch. Batch gets it only when `providers_order` is passed explicitly (batch does not read `provider_routing` from config). Per-model overlay applies on CLI, messaging gateway, TUI, and Desktop; cron uses the flat `order` from config. State is per-agent. Curator constructs an `AIAgent` without `providers_*`, so its sticky pool is empty and the pin is not active (use `auxiliary.curator.extra_body` for curator routing).
+
+Sticky is live only on the native OpenRouter **chat-completions** path. Nous Portal is excluded: the Portal ignores or rejects the `provider` object. `custom:` endpoints are not live — sticky requires the transport to actually send a `provider` object. Any other `api_mode` (`anthropic_messages`, `codex_responses`, and future modes) and direct provider connections are a no-op.
+
+Sticky is not applied to `@preset/` models. Request-level provider routing for those models is unchanged. Sticky is also not applied to `:nitro` / `:floor` models — `provider.order` disables their tier-admission. Configured `order` is still sent unchanged; to keep tier endpoints eligible, name a tier-suffixed slug in `order` (see [`order`](#order)).
+
+Light auxiliary calls through `agent/auxiliary_client.py` (title generation, vision, compression, and other `auxiliary.<task>` work) never receive the sticky pin.
+
+Precedence: per-model `provider_routing.models.<model>` wins over the flat `provider_routing` keys; sticky then narrows `order` to the active slug **inside** that already-resolved pool. Sticky never deletes or overwrites an existing `only` list.
 
 ## How It Works
 
-Provider routing preferences are passed to OpenRouter or Nous Portal on agent chat requests and iteration-limit summaries via the `extra_body.provider` field. (`extra_body` is the OpenAI Python SDK argument; it becomes the top-level `provider` object in the JSON request.) Auxiliary tasks are configured independently: `auxiliary.<task>.providers` is the concise ordered-provider form for OpenRouter, while `auxiliary.<task>.extra_body` remains available for the full routing object.
+Provider routing preferences (`order`, `only`, and the rest of the `provider` object) are passed via the `extra_body.provider` field on agent chat requests and iteration-limit summaries wherever the active profile emits provider prefs — including Nous Portal's OpenAI-compatible wire. (`extra_body` is the OpenAI Python SDK argument; it becomes the top-level `provider` object in the JSON request.)
+
+The sticky pin itself (`order=[active_slug]`, `allow_fallbacks=false`) is applied only on native OpenRouter. Regular (non-sticky) `provider_routing` `order`/`only` is unchanged and is still emitted wherever the profile already sends provider preferences.
+
+Light auxiliary tasks that go through `agent/auxiliary_client.py` are configured independently: `auxiliary.<task>.providers` is the concise ordered-provider form for OpenRouter, while `auxiliary.<task>.extra_body` remains available for the full routing object. Those calls never receive the sticky pin.
 
 - **CLI mode** — configured in `~/.hermes/config.yaml`, loaded at startup
 - **Gateway mode** — same config file, loaded when the gateway starts

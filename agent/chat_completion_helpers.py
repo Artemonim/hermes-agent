@@ -571,9 +571,14 @@ def _provider_preferences_for_agent(agent) -> Dict[str, Any]:
     if agent.provider_data_collection:
         preferences["data_collection"] = agent.provider_data_collection
     try:
-        from agent.sticky_provider_order import apply_sticky_order_to_preferences
+        from agent.sticky_provider_order import (
+            apply_sticky_order_to_preferences,
+            maybe_warn_nitro_floor_order,
+        )
 
-        return apply_sticky_order_to_preferences(agent, preferences)
+        preferences = apply_sticky_order_to_preferences(agent, preferences)
+        maybe_warn_nitro_floor_order(agent, preferences)
+        return preferences
     except Exception:
         return preferences
 
@@ -611,6 +616,34 @@ def _effective_request_overrides(agent) -> Dict[str, Any]:
         return apply_escalation_to_overrides(agent, overrides)
     except Exception:
         return overrides
+
+
+def _apply_effective_overrides_to_summary_kwargs(agent, summary_kwargs: dict) -> None:
+    """Copy main-loop request overrides onto the iteration-limit summary call.
+
+    There is no separate ``auxiliary.summary`` tier. The summary is still
+    part of the same turn, so it must carry the effective
+    ``service_tier`` (including a TTFT climb) the conversation loop uses.
+
+    Chat-completions only. ``anthropic_messages`` does not put
+    ``service_tier`` on the wire (main loop maps overrides to
+    ``fast_mode`` only); its summary ``_ant_kw`` is built the same way.
+    """
+    try:
+        overrides = _effective_request_overrides(agent)
+    except Exception:
+        return
+    if not overrides:
+        return
+    extra_override = overrides.get("extra_body")
+    if isinstance(extra_override, dict):
+        merged = dict(summary_kwargs.get("extra_body") or {})
+        merged.update(extra_override)
+        if merged:
+            summary_kwargs["extra_body"] = merged
+    for key, value in overrides.items():
+        if key != "extra_body":
+            summary_kwargs[key] = value
 
 
 def _prompt_cache_scope_for_agent(agent) -> "str | None":
@@ -3192,8 +3225,13 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
 
             if summary_extra_body:
                 summary_kwargs["extra_body"] = summary_extra_body
+            _apply_effective_overrides_to_summary_kwargs(agent, summary_kwargs)
 
             if agent.api_mode == "anthropic_messages":
+                # * No _apply_effective_overrides_to_summary_kwargs: the
+                # main anthropic_messages path does not send service_tier
+                # (OpenRouter chat_completions only). TTFT escalation
+                # overlays that key only on an OpenRouter route.
                 _tsum = agent._get_transport()
                 _ant_kw = _tsum.build_kwargs(
                     model=agent.model,
@@ -3246,6 +3284,8 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                 _cnr_retry = _ct_retry.normalize_response(retry_response)
                 final_response = (_cnr_retry.content or "").strip()
             elif agent.api_mode == "anthropic_messages":
+                # * Same as the first summary call: no OpenRouter
+                # service_tier overlay on anthropic_messages.
                 _tretry = agent._get_transport()
                 _ant_kw2 = _tretry.build_kwargs(
                     model=agent.model,
@@ -3278,6 +3318,7 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
                     summary_kwargs["reasoning_effort"] = _lm_reasoning_effort
                 if summary_extra_body:
                     summary_kwargs["extra_body"] = summary_extra_body
+                _apply_effective_overrides_to_summary_kwargs(agent, summary_kwargs)
 
                 summary_client = agent._ensure_primary_openai_client(
                     reason="iteration_limit_summary_retry"

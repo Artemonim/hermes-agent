@@ -1,8 +1,9 @@
-"""Pin OpenRouter/Nous provider ``order`` to one live slug, rotate on failure.
+"""Pin native OpenRouter provider ``order`` to one live slug, rotate on failure.
 
 Turn-local state lives on ``agent._sticky_provider_order``. Canonical
 ``agent.providers_order`` / ``agent.providers_allowed`` are the pool
-baseline and are never mutated by this module.
+baseline and are never mutated by this module. Sticky is live only on
+native OpenRouter chat-completions (not Nous, not ``custom:``).
 """
 
 from __future__ import annotations
@@ -22,6 +23,23 @@ logger = logging.getLogger("run_agent")
 # * Failures that mean the pinned upstream is unhealthy. rate_limit (429)
 # keeps the pin — the provider is alive and the cache is still warm.
 _ROTATE_REASON_VALUES = frozenset({"timeout", "overloaded", "server_error"})
+# * Same marker as hermes_cli.models.validate_requested_model.
+_OPENROUTER_PRESET_MARKER = "@preset/"
+# * OpenRouter docs: provider.order disables :nitro/:floor tier-admission
+# unless a slug names a tier endpoint (openai/priority, openai/fast,
+# google-vertex/flex). fast and priority are interchangeable.
+_STICKY_TIER_VARIANT_SUFFIXES = frozenset({"nitro", "floor"})
+_OPENROUTER_TIER_ENDPOINT_SUFFIXES = frozenset({"priority", "fast", "flex"})
+# * Process-wide latch: configured order + :nitro/:floor warns once.
+_nitro_floor_order_warned = False
+# * Profiles that must not pin: Nous ignores/400s provider prefs; custom
+# never emits extra_body.provider on the wire.
+_STICKY_EXCLUDED_PROVIDERS = frozenset({
+    "nous",
+    "nous-portal",
+    "nousresearch",
+    "custom",
+})
 
 
 class StickyOrderState:
@@ -33,6 +51,7 @@ class StickyOrderState:
         pool: list[str] | None = None,
         order_snapshot: list[str] | None = None,
         clock: Callable[[], float] | None = None,
+        bound_model: str | None = None,
     ) -> None:
         self.config = config or DEFAULT_STICKY_ORDER
         self.pool = list(pool or [])
@@ -44,6 +63,8 @@ class StickyOrderState:
         # errors). Defer model fallback while this is < len(pool).
         self.attempts_this_request = 0
         self.clock = clock or time.monotonic
+        # * Exact model id (including variant suffix) this pin was bound for.
+        self.bound_model = str(bound_model or "")
 
     @property
     def enabled(self) -> bool:
@@ -165,6 +186,7 @@ def bind_sticky_order(
     raw_routing_config: Any = None,
     *,
     clock: Callable[[], float] | None = None,
+    model: str | None = None,
 ) -> StickyOrderState:
     """Attach or replace ``agent._sticky_provider_order``.
 
@@ -172,6 +194,10 @@ def bind_sticky_order(
     pin (warning) even when the flag is on. A changed pool (order or
     only) keeps the previous active slug when it is still eligible,
     otherwise resets the index to 0. An unchanged pool keeps the index.
+
+    ``model`` is the id the pool was resolved for. ``None`` (the default)
+    reads ``agent.model`` so constructor bind in ``agent_init`` stays a
+    two-arg call.
     """
     config = _resolve_bind_config(raw_routing_config)
     pool, order_snapshot, empty_intersection = _build_pool(agent)
@@ -183,11 +209,16 @@ def bind_sticky_order(
 
     previous = getattr(agent, "_sticky_provider_order", None)
     prev_state = previous if isinstance(previous, StickyOrderState) else None
+    if model is None:
+        bound_model = str(getattr(agent, "model", None) or "")
+    else:
+        bound_model = str(model or "")
     state = StickyOrderState(
         config=config,
         pool=pool,
         order_snapshot=order_snapshot,
         clock=clock or (prev_state.clock if prev_state is not None else None),
+        bound_model=bound_model,
     )
     if prev_state is not None:
         state.last_attempt_at = prev_state.last_attempt_at
@@ -212,18 +243,104 @@ def sticky_state(agent: Any) -> StickyOrderState | None:
     return state if isinstance(state, StickyOrderState) else None
 
 
+def _normalized_provider(agent: Any) -> str:
+    return str(getattr(agent, "provider", None) or "").strip().lower()
+
+
+def _agent_base_url(agent: Any) -> Any:
+    return getattr(agent, "base_url", None) or getattr(
+        agent, "_base_url_lower", None,
+    )
+
+
+def _base_url_host_is(agent: Any, domain: str) -> bool:
+    base_url = _agent_base_url(agent)
+    if not base_url:
+        return False
+    try:
+        from utils import base_url_host_matches
+    except Exception:
+        return domain in str(base_url).lower()
+    return base_url_host_matches(base_url, domain)
+
+
+def _provider_excluded_from_sticky(provider: str) -> bool:
+    if provider in _STICKY_EXCLUDED_PROVIDERS:
+        return True
+    return provider.startswith("custom:")
+
+
+def _model_uses_openrouter_preset(model_id: Any) -> bool:
+    return _OPENROUTER_PRESET_MARKER in str(model_id or "")
+
+
+def _model_uses_openrouter_tier_variant(model_id: Any) -> bool:
+    """True when the id ends with ``:nitro`` or ``:floor`` (tier admission)."""
+    raw = str(model_id or "")
+    if ":" not in raw:
+        return False
+    suffix = raw.rsplit(":", 1)[-1].strip().lower()
+    return suffix in _STICKY_TIER_VARIANT_SUFFIXES
+
+
+def _slug_is_openrouter_tier_endpoint(slug: str) -> bool:
+    """True for OpenRouter tier slugs such as ``openai/priority``."""
+    raw = str(slug or "").strip()
+    if "/" not in raw:
+        return False
+    suffix = raw.rsplit("/", 1)[-1].strip().lower()
+    return suffix in _OPENROUTER_TIER_ENDPOINT_SUFFIXES
+
+
+def maybe_warn_nitro_floor_order(agent: Any, preferences: dict) -> None:
+    """Warn once when ``order`` disables ``:nitro``/``:floor`` tier-admission.
+
+    Does not mutate *preferences*. OpenRouter replaces the variant sort
+    with ``provider.order``, which drops automatic priority/flex
+    admission unless a tier-suffixed slug is listed. Warning and latch
+    fire only on native OpenRouter chat-completions.
+    """
+    global _nitro_floor_order_warned
+    if _nitro_floor_order_warned:
+        return
+    if not _model_uses_openrouter_tier_variant(getattr(agent, "model", None)):
+        return
+    if not isinstance(preferences, dict):
+        return
+    order = _normalize_provider_slugs(preferences.get("order"))
+    if not order:
+        return
+    if any(_slug_is_openrouter_tier_endpoint(slug) for slug in order):
+        return
+    if not _route_applies_provider_preferences(agent):
+        return
+    _nitro_floor_order_warned = True
+    logger.warning(
+        "provider.order disables :nitro/:floor tier-admission. "
+        "To keep tier endpoints eligible, name a tier-suffixed slug "
+        "in order (for example openai/priority, openai/fast, or "
+        "google-vertex/flex).",
+    )
+
+
 def _route_applies_provider_preferences(agent: Any) -> bool:
-    """True on OpenRouter / Nous chat_completions paths that emit provider prefs."""
+    """True on native OpenRouter chat_completions paths that emit provider prefs."""
     # * Sticky is live only where extra_body.provider is actually sent:
-    # chat_completions. Other api_modes (anthropic_messages,
-    # codex_responses, bedrock_converse, …) return from build_api_kwargs
-    # before _provider_preferences_for_agent.
+    # chat_completions on native OpenRouter. Other api_modes
+    # (anthropic_messages, codex_responses, bedrock_converse, …) return
+    # from build_api_kwargs before _provider_preferences_for_agent.
     api_mode = str(getattr(agent, "api_mode", None) or "").strip().lower()
     if api_mode != "chat_completions":
         return False
-    provider = str(getattr(agent, "provider", None) or "").strip().lower()
-    if provider in {"openrouter", "nous"}:
+    provider = _normalized_provider(agent)
+    if _provider_excluded_from_sticky(provider):
+        return False
+    if _base_url_host_is(agent, "nousresearch.com"):
+        return False
+    if provider == "openrouter":
         return True
+    # * Legacy transport emits extra_body.provider when the URL is
+    # OpenRouter even without an explicit provider name.
     checker = getattr(agent, "_is_openrouter_url", None)
     if callable(checker):
         try:
@@ -231,26 +348,25 @@ def _route_applies_provider_preferences(agent: Any) -> bool:
                 return True
         except Exception:
             pass
-    base_url = getattr(agent, "base_url", None) or getattr(
-        agent, "_base_url_lower", None,
-    )
-    if not base_url:
-        return False
-    try:
-        from utils import base_url_host_matches
-    except Exception:
-        lowered = str(base_url).lower()
-        return "openrouter.ai" in lowered or "nousresearch.com" in lowered
-    return base_url_host_matches(base_url, "openrouter.ai") or base_url_host_matches(
-        base_url, "nousresearch.com",
-    )
+    return _base_url_host_is(agent, "openrouter.ai")
 
 
 def sticky_is_live(agent: Any) -> bool:
     state = sticky_state(agent)
     if state is None or not state.is_active:
         return False
-    return _route_applies_provider_preferences(agent)
+    if not _route_applies_provider_preferences(agent):
+        return False
+    # * A model change without re-bind silently disables sticky
+    # (fail-closed). Model fallback pauses the pin until the next bind.
+    current_model = str(getattr(agent, "model", None) or "")
+    if current_model != state.bound_model:
+        return False
+    if _model_uses_openrouter_preset(current_model):
+        return False
+    if _model_uses_openrouter_tier_variant(current_model):
+        return False
+    return True
 
 
 def begin_sticky_logical_request(agent: Any) -> None:
@@ -368,7 +484,12 @@ def should_fallback_on_transport_failure(
 
 
 def apply_sticky_order_to_preferences(agent: Any, preferences: dict) -> dict:
-    """Pin ``order`` to the active slug. Mirrors apply_escalation_to_overrides."""
+    """Pin ``order`` to the active slug inside the resolved pool.
+
+    Never deletes or overwrites an existing ``only`` list. If ``only`` is
+    present and does not contain the active slug, or the slug is outside
+    the bound pool, this is a no-op.
+    """
     if not isinstance(preferences, dict):
         return preferences
     if not sticky_is_live(agent):
@@ -378,12 +499,14 @@ def apply_sticky_order_to_preferences(agent: Any, preferences: dict) -> dict:
         return preferences
     # * Do not idle-reset here: prefs rebuild on every retry of the
     # same logical request, and retry backoff can exceed a small TTL.
-    note_attempt(state)
     slug = state.active_slug
-    if not slug:
+    if not slug or slug not in state.pool:
         return preferences
+    if "only" in preferences:
+        only_slugs = _normalize_provider_slugs(preferences.get("only"))
+        if slug not in only_slugs:
+            return preferences
+    note_attempt(state)
     preferences["order"] = [slug]
     preferences["allow_fallbacks"] = False
-    if "only" in preferences:
-        preferences["only"] = [slug]
     return preferences
