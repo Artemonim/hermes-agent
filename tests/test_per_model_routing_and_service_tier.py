@@ -400,7 +400,15 @@ def _switch_result(new_model: str):
 def _bind_real_switch(agent):
     from agent.agent_runtime_helpers import switch_model as real_switch
 
-    def _sm(new_model, new_provider, api_key="", base_url="", api_mode=""):
+    def _sm(
+        new_model,
+        new_provider,
+        api_key="",
+        base_url="",
+        api_mode="",
+        capabilities=None,
+        **_kwargs,
+    ):
         real_switch(
             agent,
             new_model,
@@ -408,6 +416,7 @@ def _bind_real_switch(agent):
             api_key=api_key,
             base_url=base_url,
             api_mode=api_mode,
+            capabilities=capabilities,
         )
 
     agent.switch_model = _sm
