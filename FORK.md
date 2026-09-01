@@ -23,6 +23,120 @@ fork only if a change needs a discussion thread.
 
 ---
 
+## 2026-08-31 — Per-model OpenRouter provider routing + service tier, opt-in per-turn tier escalation
+
+- **Status:** active (fork-local).
+- **Summary:** three cooperating config axes for OpenRouter. (1)
+  `provider_routing.models.<model>.<key>` — per-model overlay over the flat
+  provider-routing keys (`only`/`ignore`/`order`/`sort`/
+  `require_parameters`/`data_collection`): per-key precedence with
+  fall-through to flat, exact model-id match, resolved by one shared
+  resolver (`hermes_constants.resolve_provider_routing_for_model`) on all
+  three config readers (CLI, gateway, tui_gateway) and re-resolved by
+  `switch_model`. (2) `agent.service_tier_overrides` — per-model service
+  tier; precedence session pin > per-model > global. An explicit session
+  choice (`/fast`, including `/fast normal`) is a pin: it survives `/model`
+  and clears only on session reset. (3) `agent.service_tier_escalation`
+  (opt-in, default off) — per-turn ladder flex → default → priority driven
+  by streaming time-to-first-token: `consecutive_slow_requests` slow
+  observations climb one rung for the rest of the turn; the next user
+  prompt resets to the configured tier. Escalation applies as the last step
+  of `_effective_request_overrides` without mutating canonical
+  `agent.service_tier`/`request_overrides`, holds a wire-tier snapshot so
+  outer retries of the same logical request keep the attempt's original
+  tier, and is hard-gated off for cron, batch, subagents, background tasks,
+  and pinned sessions. Automatic provider fallback and
+  `restore_primary_runtime` re-resolve routing + tier for the model that
+  will actually serve the next request
+  (`agent_runtime_helpers.resync_per_model_routing_and_tier`) and rebase
+  the escalation ladder onto the new model's base tier — climbed rungs and
+  the slow-streak carry over, the ladder is not reset. Gateway `/fast
+  status` reports the effective tier (`fast`/`flex`/`normal`) without
+  requiring the model to support Priority/Fast mode; only switching to
+  `fast` stays capability-gated.
+- **Files:** `hermes_constants.py`, `hermes_cli/config_defaults.py`,
+  `agent/service_tier_escalation.py` (new), `agent/agent_init.py`,
+  `agent/agent_runtime_helpers.py`, `agent/chat_completion_helpers.py`,
+  `agent/conversation_loop.py`, `run_agent.py`, `batch_runner.py`,
+  `cli.py`, `hermes_cli/cli_agent_setup_mixin.py`,
+  `hermes_cli/cli_commands_mixin.py`, `gateway/run.py`,
+  `gateway/slash_commands.py`, `gateway/platforms/api_server.py`,
+  `tui_gateway/server.py`, `tui_gateway/methods_config.py`,
+  `tui_gateway/methods_prompt.py`,
+  `tests/test_per_model_routing_and_service_tier.py` (new),
+  `tests/agent/test_service_tier_escalation.py` (new),
+  `tests/test_hermes_constants.py`, `cli-config.yaml.example`,
+  `locales/en.yaml` (+ sibling locale catalogs for the new
+  `gateway.fast.status_flex` key),
+  `tests/tui_gateway/test_fast_session_scope.py`,
+  `tests/cli/test_fast_command.py`, `tests/gateway/test_fast_command.py`,
+  `tests/gateway/test_choice_picker.py`,
+  `tests/gateway/test_api_server.py`,
+  `tests/gateway/test_session_override_thread_recovery.py`,
+  `website/docs/user-guide/features/provider-routing.md`,
+  `website/docs/user-guide/configuration.md`,
+  `website/docs/reference/slash-commands.md`.
+- **Upstream disposition:** the `provider_routing.models.<id>` schema
+  deliberately mirrors open upstream PR
+  [#24495](https://github.com/NousResearch/hermes-agent/pull/24495) (issue
+  [#24493](https://github.com/NousResearch/hermes-agent/issues/24493)) so
+  user configs stay compatible if it merges. That PR wires only the CLI
+  reader at agent-init time; this fork resolves on all three surfaces and
+  on mid-session `/model`. We do **not** absorb its
+  `model.models.<id>.context_length` half (out of scope — `model_overrides`
+  already covers per-model context windows here). Per-model service tier
+  has no upstream counterpart:
+  [#78097](https://github.com/NousResearch/hermes-agent/issues/78097) is
+  per-provider and open. TTFT escalation has no upstream counterpart.
+- **Merge risk:** when #24495 merges upstream, expect textual conflicts in
+  `cli.py` (provider_routing read path) and `cli-config.yaml.example`;
+  semantics are identical (per-model wins per key, fall-through), so the
+  resolution is keep-both-shape. `agent/conversation_loop.py` is
+  high-churn — after each weekly `main` merge re-run
+  `tests/agent/test_service_tier_escalation.py` and
+  `tests/test_per_model_routing_and_service_tier.py`.
+- **Known limitations (accepted):** escalation observes only streaming
+  main-conversation requests (the non-streaming fallback path produces no
+  observation); length-continuation and compression/redirect restarts drop
+  the in-flight observation (conservative under-escalation; the state
+  self-heals on the next accepted response); TUI slash `/fast`
+  on a live agent stays ephemeral across agent rebuilds (pre-existing: the
+  slash mirror never persisted `create_service_tier_override`); TUI
+  `config.get fast` still shows the global tier when a pinned-normal agent
+  has no tier (pre-existing None-inherit display logic in
+  `methods_config.py`); the classic CLI gates the whole `/fast` command
+  behind `_fast_command_available()`, so `/fast status` stays unavailable
+  there for models without Priority/Fast support (gateway and TUI report
+  `flex` fine); cron sessions and `delegate_task` subagents do not apply
+  the per-model overlays (conscious scope boundary — the requested surfaces
+  were CLI, Telegram gateway, and Desktop); gateway `/fast` model identity
+  after an auth-fallback reflects the fallback model only when the global
+  `model.default` is empty — `last_resolved_model` is consulted solely as
+  the empty-config fallback, so with a configured default the status tracks
+  the primary model until the next turn runs (resolving the fallback
+  identity is credential-gated and deliberately not done by `/fast`); the
+  single-profile gateway reads the escalation config at process start
+  (restart to apply edits; multiplex sessions re-read it per turn inside
+  the profile scope); TUI   `_background_agent_kwargs` treats an explicit
+  `None` tier (pinned normal) as "take from config" (pre-existing);
+  TUI `preview.restart` agents deliberately stay outside the
+  config-managed provenance flag (hidden one-shot preview, escalation
+  disabled by omission) — if `_background_agent_kwargs` ever learns to
+  pass escalation config, `preview.restart` must gain both flags too;
+  gateway `/reasoning` resolves the model from the in-memory override only
+  (pre-existing — the same class `/fast` had before this change);
+  concurrency safety of the per-session tier flow is enforced by
+  construction (turn locals, no runner-shared writes) without a
+  worker-pool stress e2e; in
+  multiplex mode both the
+  agent turn and `/fast` read `channel_overrides` and the
+  `last_resolved_model` recovery fallback from process-wide runner
+  structures (pre-existing upstream architecture — secondary-profile
+  channel overrides are consulted by neither path, and the shared `*` key
+  is not profile-namespaced).
+
+---
+
 ## 2026-08-30 — Audio-rejection NameError no longer kills the turn
 
 - **Status:** active (fork-local). Live incident the same day: five Phase-1

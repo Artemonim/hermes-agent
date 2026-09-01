@@ -280,10 +280,16 @@ def _(rid, params: dict) -> dict:
             if agent is not None:
                 tier = getattr(agent, "service_tier", None)
             elif session.get("create_service_tier_override") is not None:
-                tier = session["create_service_tier_override"]
+                pin = session["create_service_tier_override"]
+                # * "" is an explicit normal pin — do not fall through to overlay.
+                tier = pin if pin else ""
         if tier is None:
-            tier = _load_service_tier()
-        return _ok(rid, {"value": "fast" if tier == "priority" else "normal"})
+            if session is not None:
+                tier = _lazy_session_service_tier(session)
+            else:
+                # No session: report the global default, not a per-model overlay.
+                tier = _load_service_tier()
+        return _ok(rid, {"value": _fast_status_value(tier if tier else None)})
     if key == "busy":
         return _ok(rid, {"value": _load_busy_input_mode()})
     if key in {"approval_mode", "approvals.mode"}:

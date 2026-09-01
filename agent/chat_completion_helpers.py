@@ -576,28 +576,36 @@ def _provider_preferences_for_agent(agent) -> Dict[str, Any]:
 def _effective_request_overrides(agent) -> Dict[str, Any]:
     """Return request overrides with the agent's service tier applied.
 
-    Explicit request overrides always win.  This lets API-server, TUI, and
-    programmatic callers use ``agent.service_tier`` without reimplementing
-    the model-specific priority/fast mapping at every entry point.
+    Baseline order: explicit ``request_overrides`` (``service_tier`` /
+    ``speed``) win over ``agent.service_tier`` mapped through
+    ``resolve_service_tier_overrides``. Per-turn TTFT escalation overlays
+    last and may replace or omit ``service_tier`` for this request; it
+    never mutates the canonical ``agent.request_overrides`` /
+    ``agent.service_tier`` baseline. While an outer-retry of the same
+    logical request is in flight, the overlay uses the pre-attempt
+    snapshot rather than a not-yet-accepted climb.
     """
     overrides = dict(getattr(agent, "request_overrides", {}) or {})
-    if "service_tier" in overrides or "speed" in overrides:
-        return overrides
+    if "service_tier" not in overrides and "speed" not in overrides:
+        try:
+            from hermes_cli.models import resolve_service_tier_overrides
 
+            tier_overrides = resolve_service_tier_overrides(
+                getattr(agent, "model", None),
+                getattr(agent, "service_tier", None),
+                provider=getattr(agent, "provider", None),
+                base_url=getattr(agent, "base_url", None),
+            )
+        except Exception:
+            tier_overrides = None
+        if tier_overrides:
+            overrides.update(tier_overrides)
     try:
-        from hermes_cli.models import resolve_service_tier_overrides
+        from agent.service_tier_escalation import apply_escalation_to_overrides
 
-        tier_overrides = resolve_service_tier_overrides(
-            getattr(agent, "model", None),
-            getattr(agent, "service_tier", None),
-            provider=getattr(agent, "provider", None),
-            base_url=getattr(agent, "base_url", None),
-        )
+        return apply_escalation_to_overrides(agent, overrides)
     except Exception:
-        tier_overrides = None
-    if tier_overrides:
-        overrides.update(tier_overrides)
-    return overrides
+        return overrides
 
 
 def _prompt_cache_scope_for_agent(agent) -> "str | None":
@@ -2874,6 +2882,20 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             )
             # Keep whatever reasoning_config was active — don't break the fallback swap.
 
+        # * Overlay routing + effective tier for the model that will actually
+        #   go on the wire. Do not call switch_model (it would reset the
+        #   TTFT escalation ladder).
+        try:
+            from agent.agent_runtime_helpers import resync_per_model_routing_and_tier
+
+            resync_per_model_routing_and_tier(agent)
+        except Exception:
+            logger.debug(
+                "Fallback %s: per-model routing/tier resync failed",
+                agent.model,
+                exc_info=True,
+            )
+
         # Keep the prompt's self-identity in sync with the model actually
         # answering, so "what model are you?" doesn't report the primary.
         rewrite_prompt_model_identity(agent, fb_model, fb_provider)
@@ -3922,6 +3944,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             )
 
     def _fire_first_delta():
+        try:
+            from agent.service_tier_escalation import mark_ttft_first_delta
+
+            mark_ttft_first_delta(agent)
+        except Exception:
+            pass
         if not first_delta_fired["done"] and on_first_delta:
             first_delta_fired["done"] = True
             try:
@@ -4022,6 +4050,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
             attempt_request_client["value"] = request_client
             last_chunk_time["t"] = time.time()
             agent._touch_activity("waiting for provider response (streaming)")
+            try:
+                from agent.service_tier_escalation import mark_ttft_send
+
+                mark_ttft_send(agent)
+            except Exception:
+                pass
             return request_client.chat.completions.create(**stream_kwargs)
 
         def _stream_created(raw_stream: Any) -> None:
@@ -4333,6 +4367,12 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
                         function_arguments = getattr(tc_function, "arguments", None)
                         if function_arguments:
                             entry["function"]["arguments"] += function_arguments
+                            try:
+                                from agent.service_tier_escalation import mark_ttft_first_delta
+
+                                mark_ttft_first_delta(agent)
+                            except Exception:
+                                pass
                     extra = getattr(tc_delta, "extra_content", None)
                     if extra is None and hasattr(tc_delta, "model_extra"):
                         extra = (tc_delta.model_extra if isinstance(tc_delta.model_extra, dict) else {}).get("extra_content")

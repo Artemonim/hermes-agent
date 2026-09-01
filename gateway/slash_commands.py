@@ -4087,26 +4087,39 @@ class GatewaySlashCommandsMixin:
         Session-scoped by default; ``--global`` persists agent.service_tier
         to config.yaml (parity with /model and /reasoning).
         """
-        from gateway.run import _load_gateway_config, _resolve_gateway_model
+        from gateway.run import _load_gateway_config
         from hermes_cli.models import model_supports_fast_mode
 
         raw_args = event.get_command_args().strip().lower()
         # Reuse the /reasoning arg parser: strips --global (any position),
         # normalizes unicode dashes.
         args, persist_global = self._parse_reasoning_command_args(raw_args)
-        session_key = self._session_key_for_source(event.source)
-        self._service_tier = self._resolve_session_service_tier(
-            session_key=session_key
-        )
-
+        # Normalize the source (Telegram DM topic recovery) before deriving
+        # the override key so storage matches the key the next message turn
+        # reads — same fix as /model and /reasoning (#30479).
+        source = await asyncio.to_thread(self._normalize_source_for_session_key, event.source)
+        session_key = self._session_key_for_source(source)
         user_config = _load_gateway_config()
-        model = _resolve_gateway_model(user_config)
-        if not model_supports_fast_mode(model):
-            return t("gateway.fast.not_supported")
+        # * Same identity chain as the next agent turn: in-memory /model
+        #   (incl. SessionStore rehydrate) → channel_overrides → global
+        #   → provider catalog → last-known-good.
+        model = self._resolve_session_effective_model(
+            source=source,
+            session_key=session_key,
+            user_config=user_config,
+        )
+        self._service_tier = self._resolve_session_service_tier(
+            session_key=session_key,
+            model=model,
+        )
 
         def _apply_fast_selection(value: str, persist: bool = False) -> str:
             """Apply a /fast argument (typed or picked) and return the reply."""
             if value in {"fast", "on"}:
+                # * Status / normal stay available for any model. Only the
+                #   priority/fast switch keeps the capability gate.
+                if not model_supports_fast_mode(model):
+                    return t("gateway.fast.not_supported")
                 tier = "priority"
                 saved_value = "fast"
                 label = t("gateway.fast.label_fast")
@@ -4135,8 +4148,14 @@ class GatewaySlashCommandsMixin:
             return t("gateway.fast.session_only", label=label)
 
         if not args or args == "status":
-            is_fast = self._service_tier == "priority"
-            status = t("gateway.fast.status_fast") if is_fast else t("gateway.fast.status_normal")
+            # * Match TUI _fast_status_value: priority → fast, flex → flex.
+            current_tier = self._service_tier
+            if current_tier == "priority":
+                status = t("gateway.fast.status_fast")
+            elif current_tier == "flex":
+                status = t("gateway.fast.status_flex")
+            else:
+                status = t("gateway.fast.status_normal")
 
             async def _on_fast_choice(_chat_id: str, value: str) -> str:
                 return _apply_fast_selection(value, persist=persist_global)
@@ -4149,12 +4168,12 @@ class GatewaySlashCommandsMixin:
                     {
                         "value": "fast",
                         "label": t("gateway.fast.choice_fast"),
-                        "is_current": is_fast,
+                        "is_current": current_tier == "priority",
                     },
                     {
                         "value": "normal",
                         "label": t("gateway.fast.choice_normal"),
-                        "is_current": not is_fast,
+                        "is_current": current_tier not in {"priority", "flex"},
                     },
                 ],
                 on_choice_selected=_on_fast_choice,

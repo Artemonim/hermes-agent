@@ -2339,6 +2339,20 @@ def _profile_runtime_scope(profile_home: "Path"):
         reset_hermes_home_override(home_token)
 
 
+def _multiplex_profiles_active(runner) -> bool:
+    """Whether this runner is a profile multiplexer.
+
+    Uses ``is True`` so MagicMock ``config`` attributes in tests do not
+    look like multiplex mode and accidentally reload launch YAML.
+    """
+    return getattr(getattr(runner, "config", None), "multiplex_profiles", False) is True
+
+
+# * Sentinel so ``_resolve_turn_agent_config`` can take an explicit ``None``
+# (session pin to normal) without treating it as "read the runner snapshot".
+_TURN_SERVICE_TIER_FROM_RUNNER = object()
+
+
 def load_gateway_config_for_runner() -> "GatewayConfig":
     """Load gateway config for the process-level GatewayRunner.
 
@@ -3864,6 +3878,15 @@ def _resolve_gateway_model(config: dict | None = None) -> str:
         return model_cfg
     elif isinstance(model_cfg, dict):
         return model_cfg.get("default") or model_cfg.get("model") or ""
+    return ""
+
+
+def _resolve_gateway_model_provider(config: dict | None = None) -> str:
+    """Read ``model.provider`` from config without resolving credentials."""
+    cfg = config if config is not None else _load_gateway_config()
+    model_cfg = cfg.get("model", {}) if isinstance(cfg, dict) else {}
+    if isinstance(model_cfg, dict):
+        return str(model_cfg.get("provider") or "").strip()
     return ""
 
 
@@ -5518,15 +5541,28 @@ class TurnRunner:
                 "tools": [],
             }
 
-        pr = self._runner._provider_routing
+        from hermes_constants import (
+            apply_provider_routing_to_agent,
+            provider_routing_constructor_kwargs,
+        )
+
+        # * Per-turn locals: never write resolved tier/routing/escalation onto
+        # the shared runner. Concurrent sessions resolve independently; a
+        # MagicMock config must not trip multiplex reload (``is True``).
+        pr_raw = getattr(self._runner, "_provider_routing", None)
+        escalation_cfg = getattr(self._runner, "_service_tier_escalation", None)
+        if _multiplex_profiles_active(self._runner):
+            pr_raw = self._runner._load_provider_routing()
+            escalation_cfg = self._runner._load_service_tier_escalation()
+        if not isinstance(pr_raw, dict):
+            pr_raw = {}
         reasoning_config = self._runner._resolve_session_reasoning_config(
             source=ctx.source,
             session_key=ctx.session_key,
             model=model,
         )
-        self._runner._reasoning_config = reasoning_config
-        self._runner._service_tier = self._runner._resolve_session_service_tier(
-            source=ctx.source, session_key=ctx.session_key
+        service_tier = self._runner._resolve_session_service_tier(
+            source=ctx.source, session_key=ctx.session_key, model=model
         )
         # Set up stream consumer for token streaming or interim commentary.
         _stream_consumer = None
@@ -5623,7 +5659,9 @@ class TurnRunner:
                 log_message="interim_assistant_callback scheduling error",
             )
 
-        turn_route = self._runner._resolve_turn_agent_config(ctx.message, model, runtime_kwargs)
+        turn_route = self._runner._resolve_turn_agent_config(
+            ctx.message, model, runtime_kwargs, service_tier=service_tier
+        )
 
         # Per-platform skip_context_files — messaging platforms can opt out
         # of filesystem-heavy context-file discovery (SOUL.md, AGENTS.md,
@@ -5868,14 +5906,10 @@ class TurnRunner:
                 ephemeral_system_prompt=combined_ephemeral or None,
                 prefill_messages=self._runner._prefill_messages or None,
                 reasoning_config=reasoning_config,
-                service_tier=self._runner._service_tier,
+                service_tier=service_tier,
+                service_tier_escalation=escalation_cfg,
                 request_overrides=turn_route.get("request_overrides"),
-                providers_allowed=pr.get("only"),
-                providers_ignored=pr.get("ignore"),
-                providers_order=pr.get("order"),
-                provider_sort=pr.get("sort"),
-                provider_require_parameters=pr.get("require_parameters", False),
-                provider_data_collection=pr.get("data_collection"),
+                **provider_routing_constructor_kwargs(pr_raw, model),
                 session_id=ctx.session_id,
                 platform=platform_key,
                 user_id=ctx.source.user_id,
@@ -5981,7 +6015,25 @@ class TurnRunner:
         agent.notice_clear_callback = None
         agent.event_callback = ctx._event_callback_sync
         agent.reasoning_config = reasoning_config
-        agent.service_tier = self._runner._service_tier
+        agent.service_tier = service_tier
+        apply_provider_routing_to_agent(agent, pr_raw, model)
+        try:
+            from agent.service_tier_escalation import bind_service_tier_escalation
+
+            bind_service_tier_escalation(agent, escalation_cfg)
+        except Exception:
+            pass
+        _t_state = (
+            self._runner._peek_session_state(ctx.session_key)
+            if ctx.session_key
+            else None
+        )
+        agent._service_tier_session_pinned = (
+            _t_state is not None
+            and _t_state.conversation.service_tier_override
+            is not _SERVICE_TIER_UNSET
+        )
+        agent._config_managed_routing_tier = True
         agent.request_overrides = turn_route.get("request_overrides") or {}
         # Must-deliver notes for THIS turn ride the current user message
         # (api_content sidecar), never the system prompt: staged by
@@ -7120,6 +7172,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self._ephemeral_system_prompt = self._load_ephemeral_system_prompt()
         self._reasoning_config = self._load_reasoning_config()
         self._service_tier = self._load_service_tier()
+        self._service_tier_escalation = self._load_service_tier_escalation()
         self._show_reasoning = self._load_show_reasoning()
         self._busy_input_mode = self._load_busy_input_mode()
         self._busy_text_mode = self._load_busy_text_mode()
@@ -8273,11 +8326,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         ``_recover_telegram_topic_thread_id`` *before* deriving the session
         key for a normal message turn (a lobby/stripped reply gets pinned to
         the user's last-active topic).  Session-scoped command handlers like
-        ``/model`` and ``/reasoning`` derive their override key from the raw
-        inbound ``event.source``, which skips that recovery — so the override
-        is stored under a different key than the next message turn reads,
-        and the override is silently dropped on Telegram forum topics and
-        after compression session splits (#30479).
+        ``/model``, ``/reasoning``, and ``/fast`` must use this helper before
+        deriving the override key — otherwise the pin is stored under a
+        different key than the next message turn reads, and is silently
+        dropped on Telegram forum topics and after compression session
+        splits (#30479).
 
         Returns a recovery-normalized copy when a rewrite applies, otherwise
         the original source unchanged.  Always derive the override storage key
@@ -8290,6 +8343,150 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if recovered is None:
             return source
         return dataclasses.replace(source, thread_id=recovered)
+
+    def _resolve_session_effective_model(
+        self,
+        *,
+        source: Optional[SessionSource] = None,
+        session_key: Optional[str] = None,
+        user_config: Optional[dict] = None,
+        runtime_model: str = "",
+        fallback_provider: str = "",
+        persist_last_resolved: bool = False,
+    ) -> str:
+        """Resolve the model the next agent turn would use (identity only).
+
+        Precedence matches ``_resolve_session_agent_runtime``: in-memory
+        ``/model`` (after SessionStore rehydrate) → ``channel_overrides`` →
+        runtime-supplied model (when the caller already resolved it) →
+        global default → provider catalog → last-known-good. Rehydrate is
+        model-only (no credential resolution) so slash status/toggle stays
+        usable when no provider key is present.
+        """
+        from hermes_cli.model_switch import resolve_effective_model
+
+        resolved_session_key = session_key
+        if not resolved_session_key and source is not None:
+            try:
+                resolved_session_key = self._session_key_for_source(source)
+            except Exception:
+                resolved_session_key = None
+
+        override = None
+        if resolved_session_key:
+            self._rehydrate_session_model_override(
+                resolved_session_key, resolve_credentials=False
+            )
+            override_state = self._peek_session_state(resolved_session_key)
+            override = (
+                override_state.conversation.model_override if override_state else None
+            )
+
+        channel = None
+        cfg = getattr(self, "config", None)
+        if cfg and source is not None:
+            chat_id = str(source.chat_id) if source.chat_id else ""
+            thread_id = (
+                str(source.thread_id) if getattr(source, "thread_id", None) else None
+            )
+            parent_id = (
+                str(source.parent_chat_id)
+                if getattr(source, "parent_chat_id", None)
+                else None
+            )
+            channel = _get_channel_override(
+                cfg,
+                source.platform,
+                chat_id,
+                thread_id=thread_id,
+                parent_id=parent_id,
+            )
+
+        # * Runtime-supplied model sits between channel and global so a
+        # fallback/provider-bundled id wins over an empty (or stale) default
+        # without beating an explicit channel.model or /model pin. The /fast
+        # path never resolves credentials; the turn passes runtime_model after
+        # its own runtime kwargs resolution.
+        model = resolve_effective_model(
+            override,
+            channel,
+            runtime_model or _resolve_gateway_model(user_config),
+        )
+        return self._complete_session_model_identity(
+            model,
+            channel=channel,
+            user_config=user_config,
+            fallback_provider=fallback_provider,
+            session_key=resolved_session_key,
+            persist_last_resolved=persist_last_resolved,
+        )
+
+    def _complete_session_model_identity(
+        self,
+        model: str,
+        *,
+        channel=None,
+        user_config: Optional[dict] = None,
+        fallback_provider: str = "",
+        session_key: Optional[str] = None,
+        persist_last_resolved: bool = False,
+    ) -> str:
+        """Fill empty model identity from provider catalog, then last-known-good.
+
+        Shared by ``_resolve_session_effective_model`` (/fast, no creds) and
+        ``_resolve_session_agent_runtime`` (turn). Does not resolve credentials.
+        """
+        model = str(model or "").strip()
+
+        if not model:
+            ch_provider = ""
+            if channel is not None:
+                ch_provider = str(getattr(channel, "provider", None) or "").strip()
+            provider = (
+                ch_provider
+                or str(fallback_provider or "").strip()
+                or _resolve_gateway_model_provider(user_config)
+            )
+            if provider:
+                try:
+                    from hermes_cli.models import get_default_model_for_provider
+
+                    model = get_default_model_for_provider(provider) or ""
+                    if model:
+                        logger.info(
+                            "No model configured — defaulting to %s for provider %s",
+                            model,
+                            provider,
+                        )
+                except Exception:
+                    pass
+
+        if not model:
+            _lr_state = (
+                self._peek_session_state(session_key) if session_key else None
+            )
+            _lr_star = self._peek_session_state("*")
+            _recovered = (
+                (_lr_state.conversation.last_resolved_model if _lr_state else "")
+                or (_lr_star.conversation.last_resolved_model if _lr_star else "")
+            )
+            if _recovered:
+                if persist_last_resolved:
+                    logger.warning(
+                        "Empty model resolved for session=%s — recovering "
+                        "last-known-good model %s (config read likely returned "
+                        "empty; see #35314)",
+                        session_key or "",
+                        _recovered,
+                    )
+                model = _recovered
+        elif persist_last_resolved:
+            if session_key:
+                self._session_state(
+                    session_key
+                ).conversation.last_resolved_model = model
+            self._session_state("*").conversation.last_resolved_model = model
+        return model
 
     def _resolve_session_agent_runtime(
         self,
@@ -8361,14 +8558,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             )
 
         runtime_kwargs = _resolve_runtime_agent_kwargs()
-        runtime_model = runtime_kwargs.pop("model", None)
+        runtime_model = runtime_kwargs.pop("model", None) or ""
         if runtime_model:
             logger.info(
                 "Runtime provider supplied explicit model override: %s -> %s",
                 model,
                 runtime_model,
             )
-            model = runtime_model
 
         cfg = getattr(self, "config", None)
         if cfg and source is not None:
@@ -8388,83 +8584,49 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 thread_id=thread_id,
                 parent_id=parent_id,
             )
-            if ch:
-                if ch.model:
-                    model = ch.model
-                if ch.provider:
-                    runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(
-                        ch.provider
-                    )
-                    ch_runtime_model = runtime_kwargs.pop("model", None)
-                    # Only adopt the provider's bundled model when the override
-                    # did not specify an explicit model.
-                    if ch_runtime_model and not ch.model:
-                        model = ch_runtime_model
+            if ch and ch.provider:
+                runtime_kwargs = _resolve_runtime_agent_kwargs_for_provider(
+                    ch.provider
+                )
+                ch_runtime_model = runtime_kwargs.pop("model", None)
+                # Only adopt the provider's bundled model when the override
+                # did not specify an explicit model.
+                if ch_runtime_model and not ch.model:
+                    runtime_model = ch_runtime_model
 
         if override and resolved_session_key:
-            model, runtime_kwargs = self._apply_session_model_override(
+            _, runtime_kwargs = self._apply_session_model_override(
                 resolved_session_key, model, runtime_kwargs
             )
 
-        # When the config has no model.default but a provider was resolved
-        # (e.g. user ran `hermes auth add openai-codex` without `hermes model`),
-        # fall back to the provider's first catalog model so the API call
-        # doesn't fail with "model must be a non-empty string".
-        if not model and runtime_kwargs.get("provider"):
-            try:
-                from hermes_cli.models import get_default_model_for_provider
-                model = get_default_model_for_provider(runtime_kwargs["provider"])
-                if model:
-                    logger.info(
-                        "No model configured — defaulting to %s for provider %s",
-                        model, runtime_kwargs["provider"],
-                    )
-            except Exception:
-                pass
-
-        # Final safety net (#35314): if resolution still produced an empty
-        # model — e.g. a transient config-cache miss during a post-interrupt
-        # recovery turn returned an empty user_config — reuse the last model we
-        # successfully resolved for this session (or, failing that, the most
-        # recent one resolved process-wide). Building an agent with model=""
-        # makes every API call fail HTTP 400 "No models provided" and the
-        # session goes silent until the user manually re-sends. ``getattr``
-        # guards against bare test runners built via ``object.__new__``.
-        if not model:
-            _lr_state = (
-                self._peek_session_state(resolved_session_key)
-                if resolved_session_key
-                else None
-            )
-            _lr_star = self._peek_session_state("*")
-            _recovered = (
-                (_lr_state.conversation.last_resolved_model if _lr_state else "")
-                or (_lr_star.conversation.last_resolved_model if _lr_star else "")
-            )
-            if _recovered:
-                logger.warning(
-                    "Empty model resolved for session=%s — recovering "
-                    "last-known-good model %s (config read likely returned "
-                    "empty; see #35314)",
-                    resolved_session_key or "", _recovered,
-                )
-                model = _recovered
-        elif model:
-            # Cache the good resolution for future recovery turns.
-            if resolved_session_key:
-                self._session_state(
-                    resolved_session_key
-                ).conversation.last_resolved_model = model
-            self._session_state("*").conversation.last_resolved_model = model
-
+        # * Identity SoT is the same helper /fast uses. Runtime kwargs
+        # stay here (credentials); model id is shared.
+        model = self._resolve_session_effective_model(
+            source=source,
+            session_key=resolved_session_key,
+            user_config=user_config,
+            runtime_model=runtime_model,
+            fallback_provider=str(runtime_kwargs.get("provider") or ""),
+            persist_last_resolved=True,
+        )
         return model, runtime_kwargs
 
-    def _resolve_turn_agent_config(self, user_message: str, model: str, runtime_kwargs: dict) -> dict:
+    def _resolve_turn_agent_config(
+        self,
+        user_message: str,
+        model: str,
+        runtime_kwargs: dict,
+        service_tier=_TURN_SERVICE_TIER_FROM_RUNNER,
+    ) -> dict:
         """Build the effective model/runtime config for a single turn.
 
         Always uses the session's primary model/provider.  If a service tier
         is configured, attach its model-aware request overrides so the API
         call is marked accordingly.
+
+        *service_tier* is the already-resolved session value. When omitted,
+        fall back to ``self._service_tier`` for tests and slash handlers that
+        still set the launch snapshot — production turn paths pass a local.
         """
         from hermes_cli.models import resolve_service_tier_overrides
 
@@ -8493,7 +8655,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             ),
         }
 
-        service_tier = getattr(self, "_service_tier", None)
+        if service_tier is _TURN_SERVICE_TIER_FROM_RUNNER:
+            service_tier = getattr(self, "_service_tier", None)
         if not service_tier:
             route["request_overrides"] = {}
             return route
@@ -9809,12 +9972,14 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self,
         source=None,
         session_key: Optional[str] = None,
+        model: str = "",
     ) -> Optional[str]:
         """Resolve the effective service tier for a session.
 
-        A session-scoped /fast override wins over the config default. The
-        override dict stores "priority" or None (explicit normal), so key
-        presence — not value truthiness — decides whether it applies.
+        Precedence: session-scoped /fast pin > per-model override >
+        global ``agent.service_tier``. The override dict stores "priority"
+        or None (explicit normal), so key presence — not value truthiness —
+        decides whether a pin applies.
         """
         resolved_session_key = session_key
         if not resolved_session_key and source is not None:
@@ -9831,7 +9996,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 is not _SERVICE_TIER_UNSET
             ):
                 return _t_state.conversation.service_tier_override
-        return self._load_service_tier()
+        return self._load_service_tier(model)
 
     def _set_session_service_tier_override(
         self,
@@ -9855,26 +10020,32 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
 
     @staticmethod
-    def _load_service_tier() -> str | None:
+    def _load_service_tier(model: str = "") -> str | None:
         """Load the configured API service tier from config.yaml.
 
-        Reads agent.service_tier from config.yaml. Accepted values mirror the CLI:
-        "fast"/"priority"/"on" => "priority" and "flex" => "flex", while
-        "normal"/"off" disables it.
-        Returns None when unset or unsupported.
+        Per-model ``agent.service_tier_overrides`` wins over global
+        ``agent.service_tier``. Session pins are applied by
+        ``_resolve_session_service_tier`` before this helper.
         """
         cfg = _load_gateway_runtime_config()
-        raw = str(cfg_get(cfg, "agent", "service_tier", default="") or "").strip()
+        agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else {}
+        from hermes_constants import resolve_service_tier_for_model
 
-        from hermes_constants import SERVICE_TIER_DISABLED_VALUES, parse_service_tier
+        return resolve_service_tier_for_model(
+            agent_cfg if isinstance(agent_cfg, dict) else {},
+            model,
+        )
 
-        parsed = parse_service_tier(raw)
-        if parsed is not None:
-            return parsed
-        if not raw or raw.lower() in SERVICE_TIER_DISABLED_VALUES:
-            return None
-        logger.warning("Unknown service_tier '%s', ignoring", raw)
-        return None
+    @staticmethod
+    def _load_service_tier_escalation():
+        """Load opt-in TTFT service-tier escalation (disabled by default)."""
+        cfg = _load_gateway_runtime_config()
+        agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else {}
+        from hermes_constants import resolve_service_tier_escalation_config
+
+        return resolve_service_tier_escalation_config(
+            agent_cfg if isinstance(agent_cfg, dict) else {},
+        )
 
     @staticmethod
     def _load_show_reasoning() -> bool:
@@ -23720,14 +23891,28 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             disabled_toolsets = parse_config_string_list(agent_cfg.get("disabled_toolsets")) or None
 
-            pr = self._provider_routing
+            from hermes_constants import (
+                apply_provider_routing_to_agent,
+                provider_routing_constructor_kwargs,
+            )
+
+            pr_raw = getattr(self, "_provider_routing", None)
+            escalation_cfg = getattr(self, "_service_tier_escalation", None)
+            if _multiplex_profiles_active(self):
+                pr_raw = self._load_provider_routing()
+                escalation_cfg = self._load_service_tier_escalation()
+            if not isinstance(pr_raw, dict):
+                pr_raw = {}
             max_iterations = _current_max_iterations()
             reasoning_config = self._resolve_session_reasoning_config(
                 source=source, model=model
             )
-            self._reasoning_config = reasoning_config
-            self._service_tier = self._resolve_session_service_tier(source=source)
-            turn_route = self._resolve_turn_agent_config(prompt, model, runtime_kwargs)
+            service_tier = self._resolve_session_service_tier(
+                source=source, model=model
+            )
+            turn_route = self._resolve_turn_agent_config(
+                prompt, model, runtime_kwargs, service_tier=service_tier
+            )
 
             # Enrich the prompt with image descriptions so the background
             # agent can see user-attached images (same as the main flow).
@@ -23757,14 +23942,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     enabled_toolsets=enabled_toolsets,
                     disabled_toolsets=disabled_toolsets,
                     reasoning_config=reasoning_config,
-                    service_tier=self._service_tier,
+                    service_tier=service_tier,
+                    service_tier_escalation=escalation_cfg,
                     request_overrides=turn_route.get("request_overrides"),
-                    providers_allowed=pr.get("only"),
-                    providers_ignored=pr.get("ignore"),
-                    providers_order=pr.get("order"),
-                    provider_sort=pr.get("sort"),
-                    provider_require_parameters=pr.get("require_parameters", False),
-                    provider_data_collection=pr.get("data_collection"),
+                    **provider_routing_constructor_kwargs(pr_raw, model),
                     session_id=task_id,
                     platform=platform_key,
                     user_id=source.user_id,
@@ -23778,6 +23959,16 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     # Reload from disk — do not reuse the startup snapshot (#60955).
                     fallback_model=self._refresh_fallback_model(),
                 )
+                # * Background tasks must not climb the TTFT ladder even if
+                # turn_route runtime accidentally carries enabled config.
+                agent._block_service_tier_escalation = True
+                apply_provider_routing_to_agent(agent, pr_raw, model)
+                _bg_agent_cfg = (
+                    user_config.get("agent") if isinstance(user_config, dict) else None
+                )
+                if isinstance(_bg_agent_cfg, dict):
+                    agent._agent_config = _bg_agent_cfg
+                agent._config_managed_routing_tier = True
                 try:
                     return agent.run_conversation(
                         user_message=enriched_prompt,
@@ -27578,25 +27769,57 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         )
         return hashlib.sha256(blob.encode()).hexdigest()[:16]
 
-    def _rehydrate_session_model_override(self, session_key: str) -> None:
+    def _rehydrate_session_model_override(
+        self, session_key: str, *, resolve_credentials: bool = True
+    ) -> None:
         """Lazily restore a persisted /model override after a gateway restart.
 
         ``_session_model_overrides`` is in-memory only, so before persistence
         a restart silently reverted every session to the global default model.
         The non-secret parts (model/provider/base_url) are written through to
         the session store when /model runs (and cleared on /new); here we read
-        them back on first use and re-resolve credentials via the normal
-        runtime provider resolution — api_key is never persisted to disk.
+        them back on first use. When ``resolve_credentials`` is true (agent
+        turn), credentials are re-resolved via the normal runtime provider
+        path — api_key is never persisted to disk. ``/fast`` status passes
+        ``resolve_credentials=False`` so the slash handler stays model-only.
 
-        No-op when an in-memory override already exists (live state wins) or
-        when the store has nothing persisted (e.g. the user ran /new, which
-        clears both the in-memory dict and the persisted field).
+        No-op when an in-memory override already exists and either credentials
+        are not requested or the override already has an api_key. A model-only
+        override left by ``/fast`` can still be credential-filled on the next
+        turn. No-op when the store has nothing persisted (e.g. the user ran
+        /new, which clears both the in-memory dict and the persisted field).
         """
         _rehydrate_state = self._peek_session_state(session_key)
-        if (
-            _rehydrate_state is not None
-            and _rehydrate_state.conversation.model_override is not None
-        ):
+        existing = (
+            _rehydrate_state.conversation.model_override
+            if _rehydrate_state is not None
+            else None
+        )
+        if existing is not None:
+            if (
+                not resolve_credentials
+                or existing.get("api_key")
+                or not existing.get("provider")
+            ):
+                return
+            # * Model-only override (e.g. /fast status after restart) — fill
+            # credentials for the next agent turn without re-reading disk.
+            try:
+                runtime = _resolve_runtime_agent_kwargs_for_provider(
+                    existing["provider"]
+                )
+                existing["api_key"] = runtime.get("api_key")
+                existing["api_mode"] = runtime.get("api_mode")
+                existing["credential_pool"] = runtime.get("credential_pool")
+                if not existing.get("base_url"):
+                    existing["base_url"] = runtime.get("base_url")
+            except Exception:
+                logger.debug(
+                    "Credential re-resolution failed for persisted override "
+                    "(provider=%s); using credential-less override",
+                    existing.get("provider"),
+                    exc_info=True,
+                )
             return
         store = getattr(self, "session_store", None)
         if store is None:
@@ -27616,7 +27839,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             "base_url": persisted.get("base_url"),
         }
         provider = persisted.get("provider")
-        if provider:
+        if provider and resolve_credentials:
             # Re-resolve credentials for the persisted provider. On failure
             # (e.g. credentials were removed since the switch) keep the
             # credential-less override — _resolve_session_agent_runtime falls

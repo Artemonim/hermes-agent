@@ -597,6 +597,7 @@ def init_agent(
     max_tokens: int = None,
     reasoning_config: Dict[str, Any] = None,
     service_tier: str = None,
+    service_tier_escalation: Dict[str, Any] = None,
     request_overrides: Dict[str, Any] = None,
     prefill_messages: List[Dict[str, Any]] = None,
     platform: str = None,
@@ -974,6 +975,26 @@ def init_agent(
     # keep it in sync with the active provider.
     agent._reasoning_echo_flag = agent._read_reasoning_echo_from_config()
     agent.service_tier = parse_service_tier(service_tier)
+    # * Session /fast (or surface) pin; per-model overlay must not replace it.
+    agent._service_tier_session_pinned = False
+    # * Opt-in: fallback/restore may re-apply config routing/tier. Surfaces
+    #   that resolve from config.yaml set this True after construction.
+    #   Programmatic / SDK AIAgent() stays False (constructor values win).
+    agent._config_managed_routing_tier = False
+    # * Turn-local TTFT ladder; never mutates service_tier / request_overrides.
+    from agent.service_tier_escalation import bind_service_tier_escalation
+
+    bind_service_tier_escalation(agent, service_tier_escalation)
+    # * Batch runner and gateway background tasks set this True so an
+    # accidentally enabled escalation config cannot climb the ladder.
+    agent._block_service_tier_escalation = False
+    # * Raw provider_routing (including models:) and agent: section for
+    #   switch_model / fallback re-resolve without a full switch_model.
+    #   Filled after load_config_readonly() below so multiplex turns that
+    #   construct the agent inside _profile_runtime_scope snapshot THIS
+    #   profile, and resync does not need a later unscoped load_config().
+    agent._provider_routing_config = None
+    agent._agent_config = None
     agent.request_overrides = dict(request_overrides or {})
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False
@@ -1811,6 +1832,13 @@ def init_agent(
         _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
+    if isinstance(_agent_cfg, dict):
+        _agent_section = _agent_cfg.get("agent")
+        if isinstance(_agent_section, dict):
+            agent._agent_config = _agent_section
+        _pr_section = _agent_cfg.get("provider_routing")
+        if isinstance(_pr_section, dict):
+            agent._provider_routing_config = _pr_section
 
     # Codex commentary visibility (display.show_commentary, default true).
     # When true, completed Codex phase=commentary messages are delivered as

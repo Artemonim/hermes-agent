@@ -40,6 +40,44 @@ from hermes_cli.browser_connect import (
 )
 
 
+def _effective_service_tier_for_fast_status(shell):
+    """Resolve the tier CLI /fast status should display.
+
+    Session /fast pin wins. Unpinned shells re-resolve from config so a
+    per-model overlay (e.g. flex on openai/gpt-5) is visible even when
+    ``shell.service_tier`` still holds the global default.
+    """
+    if getattr(shell, "_service_tier_session_pinned", False) is True:
+        return getattr(shell, "service_tier", None)
+    agent = getattr(shell, "agent", None)
+    model = getattr(agent, "model", None) if agent is not None else None
+    if not isinstance(model, str) or not model:
+        model = getattr(shell, "model", None)
+    try:
+        from hermes_constants import resolve_service_tier_for_model
+
+        cfg = getattr(shell, "config", None)
+        agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else None
+        if isinstance(agent_cfg, dict):
+            return resolve_service_tier_for_model(agent_cfg, model)
+    except Exception:
+        pass
+    return getattr(shell, "service_tier", None)
+
+
+def _fast_status_label(shell) -> str:
+    """Map effective service_tier to CLI /fast status: fast / flex / normal.
+
+    Mirrors TUI ``_fast_status_value`` and gateway ``/fast status``.
+    """
+    current_tier = _effective_service_tier_for_fast_status(shell)
+    if current_tier == "priority":
+        return "fast"
+    if current_tier == "flex":
+        return "flex"
+    return "normal"
+
+
 class CLICommandsMixin:
     """Mixin holding the interactive-CLI slash-command handlers.
 
@@ -2260,6 +2298,9 @@ class CLICommandsMixin:
                     session_db=self._session_db,
                     reasoning_config=self.reasoning_config,
                     service_tier=self.service_tier,
+                    service_tier_escalation=getattr(
+                        self, "_service_tier_escalation_cfg", None
+                    ),
                     request_overrides=turn_route.get("request_overrides"),
                     providers_allowed=self._providers_only,
                     providers_ignored=self._providers_ignore,
@@ -2270,6 +2311,10 @@ class CLICommandsMixin:
                     openrouter_min_coding_score=self._openrouter_min_coding_score,
                     fallback_model=self._fallback_model,
                 )
+                # * Background tasks must not climb the TTFT ladder even if
+                # the shell escalation config is enabled (gateway /bg parity).
+                bg_agent._block_service_tier_escalation = True
+                bg_agent._config_managed_routing_tier = True
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None
 
@@ -3842,7 +3887,7 @@ class CLICommandsMixin:
         Session-scoped by default; ``--global`` persists agent.service_tier
         to config.yaml (parity with /model and /reasoning).
         """
-        from cli import _ACCENT, _DIM, _RST, _cprint, save_config_value
+        from cli import CLI_CONFIG, _ACCENT, _DIM, _RST, _cprint, save_config_value
         if not self._fast_command_available():
             _cprint("  (._.) /fast is only available for models that support fast mode (OpenAI Priority Processing or Anthropic Fast Mode).")
             return
@@ -3858,7 +3903,7 @@ class CLICommandsMixin:
 
         parts = cmd.strip().split(maxsplit=1)
         if len(parts) < 2 or parts[1].strip().lower() == "status":
-            status = "fast" if self.service_tier == "priority" else "normal"
+            status = _fast_status_label(self)
             _cprint(f"  {_ACCENT}{feature_name}: {status}{_RST}")
             _cprint(f"  {_DIM}Usage: /fast [normal|fast|status] [--global]{_RST}")
             return
@@ -3870,7 +3915,7 @@ class CLICommandsMixin:
             if token not in ("--global", "--session")
         )
 
-        if arg in {"fast", "on"}:
+        if arg in {"fast", "on", "priority"}:
             self.service_tier = "priority"
             saved_value = "fast"
             label = "FAST"
@@ -3885,10 +3930,18 @@ class CLICommandsMixin:
 
         self.agent = None  # Force agent re-init with new service-tier config
         if explicit_global and save_config_value("agent.service_tier", saved_value):
+            self._service_tier_session_pinned = False
+            agent_cfg = CLI_CONFIG.get("agent")
+            if not isinstance(agent_cfg, dict):
+                agent_cfg = {}
+                CLI_CONFIG["agent"] = agent_cfg
+            agent_cfg["service_tier"] = saved_value
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (saved to config){_RST}")
         elif explicit_global:
+            self._service_tier_session_pinned = True
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (session only; config save failed){_RST}")
         else:
+            self._service_tier_session_pinned = True
             _cprint(f"  {_ACCENT}✓ {feature_name} set to {label} (this session — use --global to persist){_RST}")
 
     def _handle_debug_command(self, cmd_original: str = ""):

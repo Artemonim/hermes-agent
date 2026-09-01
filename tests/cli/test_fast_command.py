@@ -58,6 +58,64 @@ class TestHandleFastCommand(unittest.TestCase):
         printed = " ".join(str(c) for c in mock_cprint.call_args_list)
         self.assertIn("normal", printed)
 
+    def test_status_shows_flex_from_global_tier(self):
+        cli_mod = _import_cli()
+        stub = self._make_cli(service_tier="flex")
+        with (
+            patch.object(cli_mod, "_cprint") as mock_cprint,
+            patch.object(cli_mod, "save_config_value") as mock_save,
+        ):
+            cli_mod.HermesCLI._handle_fast_command(stub, "/fast status")
+
+        mock_save.assert_not_called()
+        status_line = str(mock_cprint.call_args_list[0])
+        self.assertIn("flex", status_line)
+        self.assertNotIn("normal", status_line)
+
+    def test_status_shows_flex_from_per_model_override(self):
+        cli_mod = _import_cli()
+        stub = self._make_cli(service_tier="priority")
+        stub.model = "openai/gpt-5"
+        stub._service_tier_session_pinned = False
+        stub.config = {
+            "agent": {
+                "service_tier": "priority",
+                "service_tier_overrides": {"openai/gpt-5": "flex"},
+            }
+        }
+        with (
+            patch.object(cli_mod, "_cprint") as mock_cprint,
+            patch.object(cli_mod, "save_config_value") as mock_save,
+        ):
+            cli_mod.HermesCLI._handle_fast_command(stub, "/fast status")
+
+        mock_save.assert_not_called()
+        status_line = str(mock_cprint.call_args_list[0])
+        self.assertIn("flex", status_line)
+        self.assertNotIn("normal", status_line)
+
+    def test_status_shows_fast_when_session_pin_beats_per_model_override(self):
+        cli_mod = _import_cli()
+        stub = self._make_cli(service_tier="priority")
+        stub.model = "openai/gpt-5"
+        stub._service_tier_session_pinned = True
+        stub.config = {
+            "agent": {
+                "service_tier": "flex",
+                "service_tier_overrides": {"openai/gpt-5": "flex"},
+            }
+        }
+        with (
+            patch.object(cli_mod, "_cprint") as mock_cprint,
+            patch.object(cli_mod, "save_config_value") as mock_save,
+        ):
+            cli_mod.HermesCLI._handle_fast_command(stub, "/fast status")
+
+        mock_save.assert_not_called()
+        status_line = str(mock_cprint.call_args_list[0])
+        self.assertIn("fast", status_line)
+        self.assertNotIn("flex", status_line)
+        self.assertNotIn("normal", status_line)
 
     def test_normal_argument_clears_service_tier(self):
         cli_mod = _import_cli()
@@ -72,6 +130,33 @@ class TestHandleFastCommand(unittest.TestCase):
         mock_save.assert_not_called()
         self.assertIsNone(stub.service_tier)
         self.assertIsNone(stub.agent)
+
+    def test_global_fast_updates_in_memory_config_for_next_unpinned_turn(self):
+        cli_mod = _import_cli()
+        stub = self._make_cli(service_tier=None)
+        stub._service_tier_session_pinned = False
+        stub.config = cli_mod.CLI_CONFIG
+        stub.api_key = "k"
+        stub.base_url = "https://openrouter.ai/api/v1"
+        stub.provider = "openrouter"
+        stub.api_mode = "chat_completions"
+        stub.acp_command = None
+        stub.acp_args = []
+        stub._credential_pool = None
+        with (
+            patch.object(cli_mod, "_cprint"),
+            patch.object(cli_mod, "save_config_value", return_value=True) as mock_save,
+            patch.dict(
+                cli_mod.CLI_CONFIG.setdefault("agent", {}),
+                {"service_tier": "", "service_tier_overrides": {}},
+            ),
+        ):
+            cli_mod.HermesCLI._handle_fast_command(stub, "/fast priority --global")
+            mock_save.assert_called_once_with("agent.service_tier", "fast")
+            self.assertFalse(stub._service_tier_session_pinned)
+            self.assertEqual(cli_mod.CLI_CONFIG["agent"]["service_tier"], "fast")
+            route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
+        self.assertEqual(route["request_overrides"], {"service_tier": "priority"})
 
 
     def test_unsupported_model_does_not_expose_fast(self):

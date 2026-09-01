@@ -5795,11 +5795,62 @@ def _load_reasoning_config(model: str = "") -> dict | None:
     return resolve_reasoning_config(_load_cfg(), model)
 
 
-def _load_service_tier() -> str | None:
-    from hermes_constants import parse_service_tier
+def _load_service_tier(model: str = "") -> str | None:
+    from hermes_constants import resolve_service_tier_for_model
 
-    raw = (_load_cfg().get("agent") or {}).get("service_tier", "")
-    return parse_service_tier(raw)
+    agent_cfg = (_load_cfg().get("agent") or {})
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+    return resolve_service_tier_for_model(agent_cfg, model)
+
+
+def _session_model_for_service_tier(session) -> str:
+    """Model id ``_make_agent`` would use for this session's tier overlay.
+
+    Prefers ``session["model_override"]`` as a dict (desktop draft / lazy
+    session) or a scalar model string (resume / stored row), else the
+    profile default from ``_resolve_model``.
+    """
+    if session:
+        session_override = session.get("model_override")
+        if isinstance(session_override, str):
+            model = session_override.strip()
+            if model:
+                return model
+        elif isinstance(session_override, dict):
+            model = str(session_override.get("model") or "").strip()
+            if model:
+                return model
+    return _resolve_model()
+
+
+def _lazy_session_service_tier(session) -> str | None:
+    """Unpinned effective tier for a pre-build session.
+
+    Resolves model + ``agent.service_tier`` / overrides inside the
+    session's ``_session_profile_runtime_scope`` so a named-profile lazy
+    session reads that profile's config, matching ``_make_agent``.
+    """
+    with _session_profile_runtime_scope(session or {}):
+        return _load_service_tier(_session_model_for_service_tier(session))
+
+
+def _fast_status_value(tier) -> str:
+    """Map a resolved service_tier to the ``config.get/set fast`` status label."""
+    if tier == "priority":
+        return "fast"
+    if tier == "flex":
+        return "flex"
+    return "normal"
+
+
+def _load_service_tier_escalation():
+    from hermes_constants import resolve_service_tier_escalation_config
+
+    agent_cfg = (_load_cfg().get("agent") or {})
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+    return resolve_service_tier_escalation_config(agent_cfg)
 
 
 def _load_provider_routing() -> dict:
@@ -8319,7 +8370,9 @@ def _background_agent_kwargs(agent, task_id: str) -> dict:
         "session_id": task_id,
         "reasoning_config": getattr(agent, "reasoning_config", None)
         or _load_reasoning_config(str(getattr(agent, "model", "") or "")),
-        "service_tier": getattr(agent, "service_tier", None) or _load_service_tier(),
+        "service_tier": getattr(agent, "service_tier", None) or _load_service_tier(
+            str(getattr(agent, "model", "") or "")
+        ),
         "request_overrides": dict(getattr(agent, "request_overrides", {}) or {}),
         "platform": "tui",
         "session_db": _get_db(),
@@ -8772,7 +8825,12 @@ def _make_agent(
                 raise RuntimeError("Auth fallback resolved without a model")
             model = resolution.selected_model
     _pr = _load_provider_routing()
-    return AIAgent(
+    from hermes_constants import (
+        apply_provider_routing_to_agent,
+        provider_routing_constructor_kwargs,
+    )
+    model_id = str(model or "")
+    agent = AIAgent(
         model=model,
         max_iterations=_cfg_max_turns(cfg, 500),
         provider=runtime.get("provider"),
@@ -8791,23 +8849,19 @@ def _make_agent(
         reasoning_config=(
             reasoning_config_override
             if reasoning_config_override is not None
-            else _load_reasoning_config(str(model or ""))
+            else _load_reasoning_config(model_id)
         ),
         service_tier=(
             service_tier_override
             if service_tier_override is not None
-            else _load_service_tier()
+            else _load_service_tier(model_id)
         ),
+        service_tier_escalation=_load_service_tier_escalation(),
         enabled_toolsets=_load_enabled_toolsets(_resolve_agent_platform(platform_override)),
         # OpenRouter provider-routing prefs (config.yaml `provider_routing`).
         # Mirrors the messaging gateway + CLI so the desktop/TUI honors the same
         # routing instead of letting OpenRouter pick providers at random.
-        providers_allowed=_pr.get("only"),
-        providers_ignored=_pr.get("ignore"),
-        providers_order=_pr.get("order"),
-        provider_sort=_pr.get("sort"),
-        provider_require_parameters=_pr.get("require_parameters", False),
-        provider_data_collection=_pr.get("data_collection"),
+        **provider_routing_constructor_kwargs(_pr, model_id),
         platform=_resolve_agent_platform(platform_override),
         session_id=session_id or key,
         session_db=session_db if session_db is not None else _get_db(),
@@ -8819,6 +8873,13 @@ def _make_agent(
         fallback_model=_load_fallback_model(),
         **_agent_cbs(sid),
     )
+    apply_provider_routing_to_agent(agent, _pr, model_id)
+    _agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else None
+    if isinstance(_agent_cfg, dict):
+        agent._agent_config = _agent_cfg
+    agent._service_tier_session_pinned = service_tier_override is not None
+    agent._config_managed_routing_tier = True
+    return agent
 
 
 def _init_session(
@@ -13863,20 +13924,40 @@ def _(rid, params: dict) -> dict:
     if key == "fast":
         raw = str(value or "").strip().lower()
         agent = session.get("agent") if session else None
+        # * Resolve the session model before reading current_fast so a lazy
+        #   (agent=None) session uses per-model overlay, matching _make_agent.
         if agent is not None:
-            current_fast = getattr(agent, "service_tier", None) == "priority"
+            target_model = getattr(agent, "model", None)
+        elif session is not None:
+            # A pre-build session may already have a picked model riding in
+            # model_override (desktop draft) — validate fast support against
+            # THAT model, not the global default it will never use. Named
+            # profiles must resolve the model from their own config.yaml.
+            with _session_profile_runtime_scope(session):
+                target_model = _session_model_for_service_tier(session)
+        else:
+            target_model = _session_model_for_service_tier(session)
+
+        if agent is not None:
+            current_tier = getattr(agent, "service_tier", None)
         elif session is not None and session.get("create_service_tier_override") is not None:
             # Pre-build session with a pinned tier (desktop draft pick or an
             # earlier session-scoped toggle) — report/toggle from the pin, not
-            # the global default.
-            current_fast = session["create_service_tier_override"] == "priority"
+            # the per-model / global default.
+            pin = session["create_service_tier_override"]
+            current_tier = pin if pin else None
+        elif session is not None:
+            current_tier = _lazy_session_service_tier(session)
         else:
-            current_fast = _load_service_tier() == "priority"
+            # No session: persist globally. There is no session model, so
+            # skip per-model overlay and read agent.service_tier only.
+            current_tier = _load_service_tier()
+        current_fast = current_tier in {"priority", "flex"}
 
         if raw in {"status"}:
             return _ok(
                 rid,
-                {"key": key, "value": "fast" if current_fast else "normal"},
+                {"key": key, "value": _fast_status_value(current_tier)},
             )
 
         if raw in {"", "toggle"}:
@@ -13892,18 +13973,6 @@ def _(rid, params: dict) -> dict:
         if nv == "fast":
             from hermes_cli.models import resolve_fast_mode_overrides
 
-            if agent is not None:
-                target_model = getattr(agent, "model", None)
-            else:
-                # A pre-build session may already have a picked model riding in
-                # model_override (desktop draft) — validate fast support against
-                # THAT model, not the global default it will never use.
-                session_override = (session or {}).get("model_override") or {}
-                target_model = (
-                    session_override.get("model")
-                    if isinstance(session_override, dict)
-                    else None
-                ) or _resolve_model()
             if not target_model:
                 return _err(
                     rid,
@@ -13934,12 +14003,13 @@ def _(rid, params: dict) -> dict:
             _write_config_key("agent.service_tier", nv)
         if agent is not None:
             agent.service_tier = "priority" if nv == "fast" else None
-            current_overrides = dict(getattr(agent, "request_overrides", {}) or {})
-            current_overrides.pop("service_tier", None)
-            current_overrides.pop("speed", None)
-            if nv == "fast":
-                current_overrides.update(overrides)
-            agent.request_overrides = current_overrides
+            # * Explicit session /fast choice always pins (fast and normal).
+            #   Per-model / global overlay returns only after /new (rebuild
+            #   without create_service_tier_override).
+            agent._service_tier_session_pinned = True
+            from agent.agent_runtime_helpers import sync_request_overrides_service_tier
+
+            sync_request_overrides_service_tier(agent)
             _persist_live_session_runtime(session)
             _emit(
                 "session.info",
@@ -16093,8 +16163,14 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
             mode = arg.lower()
             if mode in {"fast", "on"}:
                 agent.service_tier = "priority"
+                agent._service_tier_session_pinned = True
             elif mode in {"normal", "off"}:
                 agent.service_tier = None
+                agent._service_tier_session_pinned = True
+            if mode in {"fast", "on", "normal", "off"}:
+                from agent.agent_runtime_helpers import sync_request_overrides_service_tier
+
+                sync_request_overrides_service_tier(agent)
             _emit("session.info", sid, _session_info(agent, session))
         elif name == "reload-mcp" and agent and hasattr(agent, "reload_mcp_tools"):
             agent.reload_mcp_tools()

@@ -370,6 +370,19 @@ DEFAULT_CONFIG = {
         # Edit directly in config.yaml (no CLI support due to dots in keys).
         "reasoning_overrides": {},
 
+        # Per-model service-tier overlay (exact API model id). Takes
+        # precedence over agent.service_tier; a session /fast pin still wins.
+        # Edit directly in config.yaml (no CLI support due to dots in keys).
+        "service_tier_overrides": {},
+
+        # Opt-in per-turn OpenRouter service-tier climb on slow TTFT.
+        # Off by default. Does not persist; resets at each user turn.
+        "service_tier_escalation": {
+            "enabled": False,
+            "ttft_threshold_seconds": 8.0,
+            "consecutive_slow_requests": 1,
+        },
+
         # Per-provider opt-in to preserve assistant ``reasoning_content``
         # when replaying history.  The built-in echo families (DeepSeek,
         # Kimi/Moonshot, Xiaomi MiMo) are auto-detected by provider name

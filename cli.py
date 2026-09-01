@@ -485,6 +485,12 @@ def load_cli_config() -> Dict[str, Any]:
             "prefill_messages_file": "",
             "reasoning_effort": "",
             "service_tier": "",
+            "service_tier_overrides": {},
+            "service_tier_escalation": {
+                "enabled": False,
+                "ttft_threshold_seconds": 8.0,
+                "consecutive_slow_requests": 1,
+            },
             # Built-in personalities live in hermes_cli.personality
             # (BUILTIN_PERSONALITIES) — the single owner. Entries here are
             # user-defined additions/overrides merged on top by name.
@@ -5416,18 +5422,25 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 )
             else:
                 self.reasoning_config = _cli_reasoning
-        self.service_tier = _parse_service_tier_config(
-            CLI_CONFIG["agent"].get("service_tier", "")
+        self._service_tier_session_pinned = False
+        self._provider_routing_raw = CLI_CONFIG.get("provider_routing", {}) or {}
+        if not isinstance(self._provider_routing_raw, dict):
+            self._provider_routing_raw = {}
+        from hermes_constants import (
+            resolve_provider_routing_for_model,
+            resolve_service_tier_escalation_config,
+            resolve_service_tier_for_model,
         )
-        
-        # OpenRouter provider routing preferences
-        pr = CLI_CONFIG.get("provider_routing", {}) or {}
-        self._provider_sort = pr.get("sort")
-        self._providers_only = pr.get("only")
-        self._providers_ignore = pr.get("ignore")
-        self._providers_order = pr.get("order")
-        self._provider_require_params = pr.get("require_parameters", False)
-        self._provider_data_collection = pr.get("data_collection")
+        _agent_cfg = CLI_CONFIG.get("agent") if isinstance(CLI_CONFIG.get("agent"), dict) else {}
+        self.service_tier = resolve_service_tier_for_model(_agent_cfg, self.model)
+        self._service_tier_escalation_cfg = resolve_service_tier_escalation_config(_agent_cfg)
+        _pr = resolve_provider_routing_for_model(self._provider_routing_raw, self.model)
+        self._provider_sort = _pr.get("sort")
+        self._providers_only = _pr.get("only")
+        self._providers_ignore = _pr.get("ignore")
+        self._providers_order = _pr.get("order")
+        self._provider_require_params = _pr.get("require_parameters", False)
+        self._provider_data_collection = _pr.get("data_collection")
 
         # OpenRouter Pareto Code router knob — coding-score floor (0.0-1.0).
         # Only applied when model.model == "openrouter/pareto-code".
@@ -10041,9 +10054,7 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         # so a session-only switch never leaks into the next session (#48055,
         # #23131).
         self._pending_one_turn_model_restore = None
-        self.service_tier = _parse_service_tier_config(
-            CLI_CONFIG["agent"].get("service_tier", "")
-        )
+        self._service_tier_session_pinned = False
         _model_config = CLI_CONFIG.get("model", {})
         _raw_default2 = (_model_config.get("default") or _model_config.get("model") or "") if isinstance(_model_config, dict) else (_model_config or "")
         _config_model, _ = _split_model_config_default(_raw_default2)
@@ -10094,12 +10105,55 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                 # Best-effort: an unreachable config default must never block
                 # /new. The session keeps the current working model.
                 logger.debug("/new model reset to config default failed", exc_info=True)
+        from hermes_constants import (
+            apply_provider_routing_to_agent,
+            resolve_provider_routing_for_model,
+            resolve_service_tier_escalation_config,
+            resolve_service_tier_for_model,
+        )
+        _agent_cfg = CLI_CONFIG.get("agent") if isinstance(CLI_CONFIG.get("agent"), dict) else {}
+        _new_model = getattr(self, "model", "") or ""
+        self.service_tier = resolve_service_tier_for_model(_agent_cfg, _new_model)
+        self._service_tier_escalation_cfg = resolve_service_tier_escalation_config(_agent_cfg)
+        _pr = resolve_provider_routing_for_model(
+            getattr(self, "_provider_routing_raw", None) or CLI_CONFIG.get("provider_routing") or {},
+            _new_model,
+        )
+        self._provider_sort = _pr.get("sort")
+        self._providers_only = _pr.get("only")
+        self._providers_ignore = _pr.get("ignore")
+        self._providers_order = _pr.get("order")
+        self._provider_require_params = _pr.get("require_parameters", False)
+        self._provider_data_collection = _pr.get("data_collection")
         _sync_process_session_id(self.session_id)
 
         if self.agent:
             self.agent.session_id = self.session_id
             self.agent.session_start = self.session_start
             self.agent.reasoning_config = self.reasoning_config
+            self.agent.service_tier = self.service_tier
+            self.agent._service_tier_session_pinned = False
+            try:
+                from agent.agent_runtime_helpers import sync_request_overrides_service_tier
+
+                sync_request_overrides_service_tier(self.agent)
+            except Exception:
+                pass
+            try:
+                from agent.service_tier_escalation import bind_service_tier_escalation
+
+                bind_service_tier_escalation(
+                    self.agent, self._service_tier_escalation_cfg
+                )
+            except Exception:
+                pass
+            apply_provider_routing_to_agent(
+                self.agent,
+                getattr(self, "_provider_routing_raw", None),
+                _new_model,
+            )
+            if isinstance(_agent_cfg, dict):
+                self.agent._agent_config = _agent_cfg
             self.agent.reset_session_state()
             if hasattr(self.agent, "_last_flushed_db_idx"):
                 self.agent._last_flushed_db_idx = 0
@@ -11324,6 +11378,49 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
         except Exception:
             save_config_value("model.context_length", None)
 
+    def _sync_shell_routing_and_service_tier(self, model: str) -> None:
+        """Keep CLI shell routing and service_tier aligned with *model*.
+
+        Background AIAgent construction reads these shell fields, and
+        ``/fast status`` reads ``self.service_tier``. A session pin
+        (``/fast``) is preserved; otherwise the effective tier comes from
+        the agent after ``switch_model``, or the per-model resolver.
+        """
+        from hermes_constants import (
+            resolve_provider_routing_for_model,
+            resolve_service_tier_for_model,
+        )
+
+        raw = getattr(self, "_provider_routing_raw", None)
+        if not isinstance(raw, dict):
+            cfg = getattr(self, "config", None) or {}
+            raw = cfg.get("provider_routing") or {}
+            self._provider_routing_raw = raw if isinstance(raw, dict) else {}
+        pr = resolve_provider_routing_for_model(
+            self._provider_routing_raw
+            if isinstance(self._provider_routing_raw, dict)
+            else {},
+            model,
+        )
+        self._provider_sort = pr.get("sort")
+        self._providers_only = pr.get("only")
+        self._providers_ignore = pr.get("ignore")
+        self._providers_order = pr.get("order")
+        self._provider_require_params = pr.get("require_parameters", False)
+        self._provider_data_collection = pr.get("data_collection")
+
+        agent = getattr(self, "agent", None)
+        if getattr(self, "_service_tier_session_pinned", False):
+            if agent is not None:
+                self.service_tier = getattr(agent, "service_tier", self.service_tier)
+            return
+        if agent is not None:
+            self.service_tier = getattr(agent, "service_tier", self.service_tier)
+            return
+        cfg = getattr(self, "config", None) or {}
+        agent_cfg = cfg.get("agent") if isinstance(cfg.get("agent"), dict) else {}
+        self.service_tier = resolve_service_tier_for_model(agent_cfg, model)
+
     def _apply_model_switch_result(
         self, result, persist_global: bool, custom_providers=None
     ) -> None:
@@ -11404,6 +11501,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     f"staying on {old_model}."
                 )
                 return
+
+        HermesCLI._sync_shell_routing_and_service_tier(self, result.new_model)
 
         from hermes_cli.model_switch import format_model_for_display
         _display_old = format_model_for_display(old_model)
@@ -11792,6 +11891,8 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin):
                     f"staying on {old_model}."
                 )
                 return
+
+        HermesCLI._sync_shell_routing_and_service_tier(self, result.new_model)
 
         # Store a note to prepend to the next user message so the model
         # knows a switch occurred (avoids injecting system messages mid-history

@@ -156,6 +156,48 @@ the configuration value when you want the OpenRouter `flex` tier by default.
 Auxiliary models have their own independent `service_tier` setting described
 under [Auxiliary Models](#auxiliary-models).
 
+Per-model overrides live in `agent.service_tier_overrides` (exact model id
+match). Precedence: session `/fast` pin > per-model override >
+`agent.service_tier`. Values are validated like `service_tier`; an invalid
+tier logs a warning and falls back to the global value:
+
+```yaml
+agent:
+  service_tier: priority                 # global default
+  service_tier_overrides:
+    google/gemini-3.7-flash: flex        # this model runs on flex
+```
+
+An explicit session choice via `/fast` (including `/fast normal`) is a pin:
+it survives mid-session `/model` switches and is only cleared by starting a
+new session.
+
+#### Per-turn tier escalation (opt-in)
+
+`agent.service_tier_escalation` lets a turn that starts on a cheaper tier
+climb when the provider is slow. While streaming, Hermes measures
+time-to-first-token (TTFT) on each main-conversation request; when TTFT
+exceeds `ttft_threshold_seconds` on `consecutive_slow_requests` requests in
+a row, the agent climbs one tier (flex → default → priority) for the
+**rest of that turn**. The next user message starts again at the configured
+tier. The classic CLI and the messaging gateway read the escalation config
+at process start (restart them after editing it); in the TUI/Desktop it
+takes effect for newly built agents (e.g. new sessions).
+
+```yaml
+agent:
+  service_tier_escalation:
+    enabled: true                  # default: false
+    ttft_threshold_seconds: 8.0
+    consecutive_slow_requests: 1   # raise for a softer trigger
+```
+
+Escalation never fires while a session `/fast` pin is active, and never
+applies to cron jobs, batch runs, subagents, or background tasks. Retried or
+interrupted requests don't count as slow observations, and a retry of the
+same request always runs on the tier that attempt started with. Escalations
+are logged at INFO level (`agent.log`).
+
 ### Provider Timeouts
 
 You can set `providers.<id>.request_timeout_seconds` for a provider-wide request timeout, plus `providers.<id>.models.<model>.timeout_seconds` for a model-specific override. Applies to the primary turn client on every transport (OpenAI-wire, native Anthropic, Anthropic-compatible), the fallback chain, rebuilds after credential rotation, and (for OpenAI-wire) the per-request timeout kwarg — so the configured value wins over the legacy `HERMES_API_TIMEOUT` env var.
