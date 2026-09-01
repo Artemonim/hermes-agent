@@ -293,11 +293,13 @@ model:
 #   # empty/invalid responses keep the pin and follow the normal
 #   # retry/fallback path (they do not walk the pool). Resets to the
 #   # first slug after ttl_seconds idle between requests. Live only
-#   # for api_mode chat_completions on OpenRouter / Nous Portal; no-op
-#   # on anthropic_messages, codex_responses, other api_modes, and
-#   # direct providers. Cron reads this order from config. Batch does
-#   # not load provider_routing from config — sticky applies there
-#   # only when providers_order is passed on the CLI.
+#   # for api_mode chat_completions on native OpenRouter. Nous Portal
+#   # is excluded (Portal ignores or rejects the provider object).
+#   # Not live for @preset/ models, :nitro/:floor variants, custom:
+#   # endpoints, anthropic_messages, codex_responses, other api_modes,
+#   # or direct providers. Cron reads this order from config. Batch
+#   # does not load provider_routing from config — sticky applies
+#   # there only when providers_order is passed on the CLI.
 #   # sticky_order:
 #   #   enabled: true            # default: false
 #   #   ttl_seconds: 600         # default: 600

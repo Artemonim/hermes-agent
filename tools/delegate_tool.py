@@ -17,6 +17,7 @@ The parent's context only sees the delegation call and the summary result,
 never the child's intermediate tool calls or reasoning.
 """
 
+import copy
 import enum
 import contextvars
 import json
@@ -1699,6 +1700,134 @@ def _inherit_parent_base_url(parent_agent, fallback_base_url: Optional[str]) -> 
     return fallback_base_url or None
 
 
+def _parent_provider_routing_snapshot(parent_agent) -> Optional[dict]:
+    """Return the parent's raw ``provider_routing`` dict, or None if unset.
+
+    Distinguishes missing/None (programmatic parent) from ``{}`` (explicit
+    empty routing). Non-dict values, including MagicMock auto-attrs, are
+    treated as missing. Never reads config.yaml — only the parent's snapshot.
+    """
+    raw = getattr(parent_agent, "_provider_routing_config", None)
+    if raw is None:
+        return None
+    if isinstance(raw, dict):
+        return raw
+    logger.warning(
+        "parent _provider_routing_config is %s, not a dict; treating as missing",
+        type(raw).__name__,
+    )
+    return None
+
+
+def _copy_provider_routing_snapshot(raw: dict) -> dict:
+    """Deep-copy the routing snapshot so nested overlay mutations stay local."""
+    return copy.deepcopy(raw)
+
+
+def _copy_provider_filter(value):
+    """Copy list filters so the child does not share the parent's list object."""
+    if isinstance(value, list):
+        return list(value)
+    return value
+
+
+def _canonical_delegation_provider(name) -> Optional[str]:
+    """Return a comparable provider id, or None when *name* is empty.
+
+    Uses ``hermes_cli.models.normalize_provider`` for alias/case folding
+    (``z-ai`` → ``zai``, ``OpenRouter`` → ``openrouter``). Empty values
+    are not passed through that helper — it defaults blank to openrouter.
+
+    ``custom:<name>`` stays a named identity. Bare ``custom`` is returned
+    as ``custom`` so the caller can refuse it as unproven.
+    """
+    raw = str(name or "").strip()
+    if not raw:
+        return None
+    lowered = raw.lower()
+    if lowered.startswith("custom:"):
+        suffix = raw.split(":", 1)[1].strip().lower()
+        return f"custom:{suffix}" if suffix else None
+    if lowered == "custom":
+        return "custom"
+    try:
+        from hermes_cli.models import normalize_provider
+
+        return normalize_provider(raw)
+    except Exception:
+        return lowered
+
+
+def _is_same_delegation_provider(override_provider, parent_provider) -> bool:
+    """True only when both sides are non-empty and canonicalize to the same id.
+
+    Bare ``custom`` is a family label, not an endpoint — two custom
+    runtimes can share that string and still be different hosts. Named
+    ``custom:<name>`` matches only the same name. Empty/None is
+    incomparable (not same).
+    """
+    left = _canonical_delegation_provider(override_provider)
+    right = _canonical_delegation_provider(parent_provider)
+    if not left or not right:
+        return False
+    # * Bare custom is not a proven endpoint identity
+    if left == "custom" or right == "custom":
+        return False
+    return left == right
+
+
+def _is_genuine_provider_override(override_provider, parent_agent) -> bool:
+    """True when *override_provider* names a different provider than the parent.
+
+    Same-provider pins (including aliases/case) are not overrides. When
+    either side is missing or custom-ambiguous, treat as a genuine
+    override so filters still clear (previous fail-open).
+    """
+    if not override_provider:
+        return False
+    return not _is_same_delegation_provider(
+        override_provider, getattr(parent_agent, "provider", None)
+    )
+
+
+def _stamp_child_provider_routing(child, snapshot: Optional[dict], model: str) -> None:
+    """Install the parent's routing snapshot and bind a fresh sticky pool.
+
+    Runtime sticky state (``active_slug``, ``StickyOrderState``) is never
+    copied from the parent. ``bind_sticky_order`` builds the pool from the
+    child's constructor attrs (already resolved for *model*).
+
+    A non-None snapshot means routing comes from config, so fallback and
+    restore must re-resolve via ``resync_per_model_routing_and_tier``.
+    """
+    raw = _copy_provider_routing_snapshot(snapshot) if snapshot is not None else None
+    try:
+        child._provider_routing_config = raw
+    except Exception as exc:
+        logger.warning(
+            "Could not stamp child _provider_routing_config: %s", exc
+        )
+    if raw is not None:
+        try:
+            child._config_managed_routing_tier = True
+        except Exception as exc:
+            logger.warning(
+                "Could not mark child routing as config-managed: %s", exc
+            )
+    try:
+        from agent.sticky_provider_order import bind_sticky_order
+        from hermes_constants import resolve_provider_routing_for_model
+
+        bind_sticky_order(
+            child,
+            resolve_provider_routing_for_model(raw, model) if raw is not None else None,
+        )
+    except Exception as exc:
+        logger.warning(
+            "Could not bind sticky provider order on child: %s", exc
+        )
+
+
 def _build_child_agent(
     task_index: int,
     goal: str,
@@ -1995,11 +2124,19 @@ def _build_child_agent(
 
     # Inherit the parent's OpenRouter provider-preference filters by default
     # (so subagents routed to the same provider honour the same routing
-    # constraints).  BUT: when `delegation.provider` is set the user is
-    # explicitly asking the child to run on a different provider, and
-    # parent-level OpenRouter filters (e.g. `only=["Anthropic"]`) would
-    # silently force the child back onto the parent's provider. Clear the
-    # filters in that case so the delegated provider is honoured.
+    # constraints).  A *genuine* provider override (delegation.provider
+    # resolves to a different provider than the parent) would let parent
+    # only/order silently drag the child back onto the parent's slugs —
+    # clear the filters then. An explicit pin of the *same* provider
+    # (``delegation.provider: openrouter`` on an OpenRouter parent) is
+    # not an override: keep inherit / re-resolve / stamp.
+    #
+    # A child on a *different model* (same provider) must not inherit
+    # the parent's already-resolved only/order: those slugs are for
+    # the parent's model. Re-resolve from the parent's raw snapshot for the
+    # child's model, or drop the filters when the parent is programmatic
+    # (no snapshot). Same-model inherit is exact API id only (including
+    # variant suffixes such as ``:free``); any other spelling re-resolves.
     child_providers_allowed = getattr(parent_agent, "providers_allowed", None)
     child_providers_ignored = getattr(parent_agent, "providers_ignored", None)
     child_providers_order = getattr(parent_agent, "providers_order", None)
@@ -2011,7 +2148,9 @@ def _build_child_agent(
         parent_agent, "provider_data_collection", None
     ) or ""
     child_openrouter_min_coding_score = getattr(parent_agent, "openrouter_min_coding_score", None)
-    if override_provider:
+    parent_routing_snapshot = _parent_provider_routing_snapshot(parent_agent)
+    stamp_child_routing = False
+    if _is_genuine_provider_override(override_provider, parent_agent):
         child_providers_allowed = None
         child_providers_ignored = None
         child_providers_order = None
@@ -2021,6 +2160,52 @@ def _build_child_agent(
         # Note: openrouter_min_coding_score is model-gated (only emitted on
         # openrouter/pareto-code), so we keep it inherited even when the
         # provider is overridden — it's a no-op on any other model.
+    else:
+        from hermes_constants import provider_routing_constructor_kwargs
+
+        # * Exact API id only. Variant suffixes (``:free`` / ``:nitro``)
+        # re-resolve so a more specific models.<id> overlay can apply.
+        same_routing_model = (
+            str(effective_model or "").strip()
+            == str(getattr(parent_agent, "model", None) or "").strip()
+        )
+        if not same_routing_model:
+            if parent_routing_snapshot is not None:
+                routing_kwargs = provider_routing_constructor_kwargs(
+                    parent_routing_snapshot, effective_model
+                )
+                child_providers_allowed = _copy_provider_filter(
+                    routing_kwargs["providers_allowed"]
+                )
+                child_providers_ignored = _copy_provider_filter(
+                    routing_kwargs["providers_ignored"]
+                )
+                child_providers_order = _copy_provider_filter(
+                    routing_kwargs["providers_order"]
+                )
+                child_provider_sort = routing_kwargs["provider_sort"]
+                child_provider_require_parameters = routing_kwargs[
+                    "provider_require_parameters"
+                ]
+                child_provider_data_collection = (
+                    routing_kwargs["provider_data_collection"] or ""
+                )
+            else:
+                # * Programmatic parent: missing/None snapshot is not a
+                # safe fallback. Different-model children must not inherit
+                # the parent's constructor order/only/ignore.
+                child_providers_allowed = None
+                child_providers_ignored = None
+                child_providers_order = None
+                child_provider_sort = None
+                child_provider_require_parameters = False
+                child_provider_data_collection = ""
+            stamp_child_routing = True
+        elif parent_routing_snapshot is not None:
+            # Same model: inherit filters unchanged, still stamp the raw
+            # snapshot so nested orchestrator→leaf with a third model can
+            # re-resolve.
+            stamp_child_routing = True
 
     child_max_tokens = (
         override_max_tokens
@@ -2128,6 +2313,12 @@ def _build_child_agent(
                 except Exception:
                     pass
             raise
+    if stamp_child_routing:
+        # * Fresh sticky pool for this child. Parent active_slug / state
+        # is never copied — only the routing snapshot.
+        _stamp_child_provider_routing(
+            child, parent_routing_snapshot, effective_model
+        )
     child._print_fn = getattr(parent_agent, "_print_fn", None)
     # Ownership transfer for the dedicated handle: the child's close() must
     # release it (nothing else holds a reference), and no parent teardown can

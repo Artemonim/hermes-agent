@@ -653,8 +653,31 @@ class TestValidateOpenRouterVariantSuffixes:
         assert result["accepted"] is False
 
     def test_unknown_suffix_keeps_old_behavior(self):
+        """Unknown suffixes are typos, not routing variants. OpenRouter 404s
+        on ``:bogus``; accepting it would treat the typo as the listed base.
+        ``:free`` is a catalog SKU (direct membership); ``:nitro`` / ``:floor``
+        / ``:exacto`` / ``:online`` are the only request-time modifiers.
+        """
         result = self._validate("x-ai/grok-4.6:bogus")
         assert result["accepted"] is False
+        assert result.get("corrected_model") is None
+
+    @pytest.mark.parametrize("suffix", ["x", "z", "1"])
+    def test_unknown_short_suffix_is_not_fuzzy_corrected(self, suffix):
+        """``:x`` is closer than cutoff 0.9 to the listed base. Fuzzy
+        auto-correction (accepted + corrected_model) must not silently
+        persist the stripped slug.
+        """
+        result = self._validate(f"x-ai/grok-4.6:{suffix}")
+        assert result["accepted"] is False
+        assert result.get("corrected_model") is None
+
+    def test_typo_without_colon_still_fuzzy_corrects(self):
+        """Bare catalog typos still auto-correct; the suffix guard is colon-only."""
+        result = self._validate("x-ai/grok-4.5")
+        assert result["accepted"] is True
+        assert result.get("corrected_model") == "x-ai/grok-4.6"
+        assert "Auto-corrected" in (result.get("message") or "")
 
     def test_free_sku_still_direct_matched(self):
         """`:free` SKUs ARE catalog entries; direct membership handles them."""
@@ -676,6 +699,20 @@ class TestValidateOpenRouterVariantSuffixes:
             api_models=["x-ai/grok-4.6"],
         )
         assert result.get("corrected_model") != "x-ai/grok-4.6:nitro"
+
+    def test_unknown_short_suffix_not_fuzzy_on_static_catalog(self):
+        """Unreachable /models still must not auto-correct ``:x`` to the base."""
+        with patch("hermes_cli.models.fetch_api_models", return_value=None), \
+             patch(
+                 "hermes_cli.models.provider_model_ids",
+                 return_value=["x-ai/grok-4.6", "anthropic/claude-opus-4.6"],
+             ):
+            result = validate_requested_model(
+                "x-ai/grok-4.6:x",
+                "openrouter",
+                base_url="https://openrouter.ai/api/v1",
+            )
+        assert result.get("corrected_model") is None
 
     def test_static_catalog_fallback_accepts_variant(self):
         """Gateway path: /models unreachable → static catalog validates the
