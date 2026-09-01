@@ -2940,6 +2940,12 @@ def run_conversation(
         api_start_time = time.time()
         retry_count = 0
         max_retries = agent._api_max_retries
+        try:
+            from agent.sticky_provider_order import apply_sticky_retry_budget
+
+            max_retries = apply_sticky_retry_budget(agent, max_retries)
+        except Exception:
+            pass
         _retry = TurnRetryState()
 
         finish_reason = "stop"
@@ -4870,6 +4876,16 @@ def run_conversation(
                     classified.retryable, classified.should_compress,
                     classified.should_rotate_credential, classified.should_fallback,
                 )
+                # * Sticky provider pin: rotate before retry so the next
+                # prefs rebuild (per-request) targets the next slug.
+                try:
+                    from agent.sticky_provider_order import (
+                        rotate_sticky_on_classified_error,
+                    )
+
+                    rotate_sticky_on_classified_error(agent, classified.reason)
+                except Exception:
+                    pass
                 agent._invoke_api_request_error_hook(
                     task_id=effective_task_id,
                     turn_id=turn_id,
@@ -5568,9 +5584,24 @@ def run_conversation(
                 )
                 if _is_zai_coding_overload:
                     max_retries = max(max_retries, zai_coding_overload_retry_ceiling())
+                # * Classic transport fallback: retry_count >= 2. Sticky may
+                # defer until every pin-pool slug has failed this request.
+                _transport_fallback = _is_transport_failure and retry_count >= 2
+                try:
+                    from agent.sticky_provider_order import (
+                        should_fallback_on_transport_failure,
+                    )
+
+                    _transport_fallback = should_fallback_on_transport_failure(
+                        agent,
+                        is_transport_failure=_is_transport_failure,
+                        retry_count=retry_count,
+                    )
+                except Exception:
+                    pass
                 _should_fallback = (
                     (is_rate_limited and _wrapped_output_cap_budget is None)
-                    or (_is_transport_failure and retry_count >= 2)
+                    or _transport_fallback
                 )
                 if _should_fallback and agent._fallback_index < len(agent._fallback_chain):
                     # Don't eagerly fallback if credential pool rotation may

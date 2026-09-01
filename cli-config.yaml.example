@@ -285,6 +285,23 @@ model:
 #   # Try providers in this order (overrides default load balancing)
 #   # order: ["anthropic", "google", "together"]
 #
+#   # Pin one slug from order across requests so prompt cache stays
+#   # warm. OpenRouter disables its own sticky routing when you set a
+#   # manual order; without this pin, providers can hop every request.
+#   # Opt-in (default: off). Rotates on timeout / overload / 5xx and
+#   # walks every slug before model fallback for those errors. 429 and
+#   # empty/invalid responses keep the pin and follow the normal
+#   # retry/fallback path (they do not walk the pool). Resets to the
+#   # first slug after ttl_seconds idle between requests. Live only
+#   # for api_mode chat_completions on OpenRouter / Nous Portal; no-op
+#   # on anthropic_messages, codex_responses, other api_modes, and
+#   # direct providers. Cron reads this order from config. Batch does
+#   # not load provider_routing from config — sticky applies there
+#   # only when providers_order is passed on the CLI.
+#   # sticky_order:
+#   #   enabled: true            # default: false
+#   #   ttl_seconds: 600         # default: 600
+#
 #   # Require providers to support all parameters in your request
 #   # require_parameters: true
 #
@@ -300,7 +317,7 @@ model:
 #     google/gemini-3.7-flash:
 #       only: ["google-ai-studio"]   # hard-pin this model to one provider
 #     z-ai/glm-5.3-flash:
-#       order: ["reka/fp8"]          # soft preference, fallbacks allowed
+#       order: ["z-ai/fp8"]          # soft preference, fallbacks allowed
 
 # =============================================================================
 # OpenRouter Response Caching (only applies when using OpenRouter)

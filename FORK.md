@@ -23,6 +23,94 @@ fork only if a change needs a discussion thread.
 
 ---
 
+## 2026-09-01 — Sticky provider order: Hermes-side pin + cyclic rotation on provider failure
+
+- **Status:** active (fork-local).
+- **Summary:** opt-in `provider_routing.sticky_order` (`enabled`, `ttl_seconds`,
+  defaults `false` / `600`). Rationale: OpenRouter disables its own sticky
+  routing when a manual `provider.order` is set (their docs: "Sticky routing
+  is not used when you specify a manual provider order"), so requests hop
+  between upstream providers and every hop re-pays the full prompt prefill
+  (prompt cache is per-provider; see OpenRouterTeam/ai-sdk-provider#499).
+  With `sticky_order.enabled`, Hermes itself pins each request to ONE active
+  slug from the pool — pool = resolved `order` (after the per-model
+  `models.<id>.order` overlay, on surfaces where the overlay applies) ∩
+  `only` (empty intersection → feature silently off + warning). On the wire
+  (`extra_body.provider`): `order: [active]`, `allow_fallbacks: false`, plus
+  `only: [active]` when the user configured `only`;
+  `ignore`/`sort`/`require_parameters`/`data_collection` untouched. The
+  active slug rotates cyclically ((i+1) mod len) when a request is
+  classified `timeout` / `overloaded` / `server_error` — never on
+  `rate_limit` (provider alive, cache warm), empty-content or
+  invalid-response retries. Those 429 / invalid-response paths keep the
+  pin and still follow the existing retry / model-fallback path (a 429
+  or empty/malformed response can still trigger classic model fallback;
+  they do not walk the pin pool). Rotation happens before the retry so
+  the retry re-collects preferences and lands on the next slug; at most
+  `len(pool)-1` rotations per logical request. Model-fallback deferral
+  counts **attempts** (rotate-worthy errors this request), not rotations:
+  eager transport-failure fallback stays off while
+  `attempts_this_request < len(pool)`, so on timeout / overloaded /
+  server_error every slug including the last gets a real request
+  (`max_retries` is raised to at least `len(pool)` when live). Idle TTL:
+  a gap between **logical requests** (turns / new API calls) longer than
+  `ttl_seconds` returns the active index to `pool[0]` — the first
+  eligible slug (every provider's cache is cold anyway, so back to the
+  user's most-preferred eligible choice). TTL is checked only at
+  `begin_sticky_logical_request` (outside the retry `while`), never on a
+  prefs rebuild between in-request retries. `len(pool)==1` pins without rotation. Rotations are
+  logged (slug, reason, index) to `agent.log`, never into the prompt.
+  State is per-agent (`agent._sticky_provider_order`), bound in
+  `agent_init` (so cron / subagents / CLI background get it from the same
+  config; cron uses the flat `order` from config, while batch only gets a
+  pool when `providers_order` is passed explicitly — pre-existing:
+  `batch_runner` does not read `provider_routing` from config) and
+  re-bound by `apply_provider_routing_to_agent` on
+  `/model` / fallback resync (pool change via order or only → keep the
+  previous active slug if it is still in the new pool, else index 0;
+  same pool → index preserved). Live only on
+  `api_mode == "chat_completions"` for OpenRouter / Nous Portal.
+  Any other `api_mode` (`anthropic_messages`, `codex_responses`, …) and
+  direct providers are a full no-op (no pin, no retry-floor, no fallback
+  deferral).
+- **Files:** `agent/sticky_provider_order.py` (new),
+  `tests/agent/test_sticky_provider_order.py` (new),
+  `hermes_constants.py` (`StickyOrderConfig`,
+  `resolve_sticky_order_config`, bind call in
+  `apply_provider_routing_to_agent`), `agent/agent_init.py` (bind),
+  `agent/chat_completion_helpers.py`
+  (`apply_sticky_order_to_preferences` in `_provider_preferences_for_agent`),
+  `agent/conversation_loop.py` (retry budget + rotate + fallback deferral
+  hooks), `cli-config.yaml.example`,
+  `website/docs/user-guide/features/provider-routing.md`.
+- **Upstream disposition:** no upstream counterpart. OpenRouter documents
+  `session_id`-based sticky routing (which Hermes already sends via the
+  OpenRouter profile's `build_extra_body`) but explicitly disables it under
+  a manual `provider.order`; upstream issue #24493 / PR #24495 cover only
+  the per-model schema, not client-side pinning.
+- **Merge risk:** `agent/conversation_loop.py` is high-churn — the three
+  hook sites (retry budget at loop start, rotate after
+  `classify_api_error`, transport-fallback gate) must survive weekly
+  `main` merges; re-run `tests/agent/test_sticky_provider_order.py` and
+  `tests/run_agent/test_provider_parity.py` after each merge.
+- **Known limitations (accepted):** rotation on a non-retryable timeout
+  (stale circuit breaker) shifts the pin without a retry of that request —
+  deliberate, the next request should avoid the timing-out provider;
+  `server_error` rotates the pin but is not added to
+  `_is_transport_failure` (no new eager fallback class when the feature is
+  off); cron resolves only the flat `order` from config (pre-existing
+  scope boundary — per-model overlays were never applied there, sticky
+  follows the same boundary); batch does not read `provider_routing`
+  from config at all (pre-existing) — sticky applies there only when
+  `providers_order` is passed explicitly on the CLI; helper-level tests
+  cover the gates, plus a
+  `run_conversation` integration with a mocked API call that walks
+  `[a,b,c]` then model-fallback; `note_attempt` ticks on the
+  compression-summary request too (it is a real provider call, so the TTL
+  semantics stay honest).
+
+---
+
 ## 2026-08-31 — Per-model OpenRouter provider routing + service tier, opt-in per-turn tier escalation
 
 - **Status:** active (fork-local).

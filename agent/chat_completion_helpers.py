@@ -570,7 +570,12 @@ def _provider_preferences_for_agent(agent) -> Dict[str, Any]:
         preferences["require_parameters"] = True
     if agent.provider_data_collection:
         preferences["data_collection"] = agent.provider_data_collection
-    return preferences
+    try:
+        from agent.sticky_provider_order import apply_sticky_order_to_preferences
+
+        return apply_sticky_order_to_preferences(agent, preferences)
+    except Exception:
+        return preferences
 
 
 def _effective_request_overrides(agent) -> Dict[str, Any]:
@@ -2963,6 +2968,15 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
     def _managed_summary_call(request, callback, *, retry_count: int):
         from agent import relay_llm
 
+        # * Summary retries reuse frozen extra_body — tick the pin
+        # timestamp on every attempt, including empty-content retries.
+        try:
+            from agent.sticky_provider_order import note_sticky_attempt
+
+            note_sticky_attempt(agent)
+        except Exception:
+            pass
+
         return relay_llm.execute_current(
             request,
             callback,
@@ -3122,6 +3136,14 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
 
             # Merge the profile's canonical body even when routing is unset:
             # profiles may always emit required metadata such as Portal tags.
+            # * Summary is its own logical request: apply idle TTL (and
+            # reset the per-request rotation budget) before prefs rebuild.
+            try:
+                from agent.sticky_provider_order import begin_sticky_logical_request
+
+                begin_sticky_logical_request(agent)
+            except Exception:
+                pass
             provider_preferences = _provider_preferences_for_agent(agent)
             profile_extra_body = {}
             try:
@@ -3284,6 +3306,21 @@ def handle_max_iterations(agent, messages: list, api_call_count: int) -> str:
 
     except Exception as e:
         logger.warning("Failed to get summary response: %s", e)
+        # * Rotate the pin on timeout/overloaded/server_error so the
+        # next request leaves the unhealthy slug. rate_limit/empty/
+        # invalid keep the pin. Fail-open: never break the summary path.
+        try:
+            from agent.error_classifier import classify_api_error
+            from agent.sticky_provider_order import rotate_sticky_on_classified_error
+
+            classified = classify_api_error(
+                e,
+                provider=str(getattr(agent, "provider", "") or ""),
+                model=str(getattr(agent, "model", "") or ""),
+            )
+            rotate_sticky_on_classified_error(agent, classified.reason)
+        except Exception:
+            pass
         final_response = f"I reached the maximum iterations ({agent.max_iterations}) but couldn't summarize. Error: {str(e)}"
     finally:
         from agent import relay_llm

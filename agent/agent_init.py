@@ -54,6 +54,7 @@ from hermes_cli.timeouts import get_provider_request_timeout
 from hermes_constants import (
     get_hermes_home,
     parse_service_tier,
+    resolve_provider_routing_for_model,
     strip_model_variant_suffix,
 )
 from utils import base_url_host_matches, is_truthy_value
@@ -1839,6 +1840,24 @@ def init_agent(
         _pr_section = _agent_cfg.get("provider_routing")
         if isinstance(_pr_section, dict):
             agent._provider_routing_config = _pr_section
+
+    # * Opt-in sticky pin from provider_routing. Constructors that pass
+    # providers_order without apply_provider_routing_to_agent (cron,
+    # subagent, CLI background, batch) still get the feature. apply()
+    # rebinds on /model and fallback resync; same-order bind keeps
+    # active_index.
+    try:
+        from agent.sticky_provider_order import bind_sticky_order
+
+        bind_sticky_order(
+            agent,
+            resolve_provider_routing_for_model(
+                getattr(agent, "_provider_routing_config", None),
+                getattr(agent, "model", "") or "",
+            ),
+        )
+    except Exception:
+        pass
 
     # Codex commentary visibility (display.show_commentary, default true).
     # When true, completed Codex phase=commentary messages are delivered as
