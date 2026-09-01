@@ -5353,6 +5353,12 @@ _SCHEMA_DEFINED_DICT_KEYS = frozenset({
     # DEFAULT_CONFIG (written only when used), so listed here for
     # `hermes config set plugins.index_url ...` validation.
     "plugins",
+    # OpenRouter provider pass-through dict — open-ended flat keys
+    # (sort, order, only, ignore, require_parameters, data_collection,
+    # plus future OpenRouter fields) and user-defined models.<model id>.
+    # Absent from DEFAULT_CONFIG (written only when used), so listed
+    # here for `hermes config set provider_routing ...` validation.
+    "provider_routing",
 })
 
 # Top-level keys that can be ANY user-supplied name (platform/provider dict

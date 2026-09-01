@@ -113,7 +113,13 @@ fork only if a change needs a discussion thread.
 
 ## 2026-08-31 — Per-model OpenRouter provider routing + service tier, opt-in per-turn tier escalation
 
-- **Status:** active (fork-local).
+- **Status:** active (fork-local). Follow-up 2026-09-01: `provider_routing`
+  registered in the `hermes config set` validator schema
+  (`_SCHEMA_KNOWN_DICT_KEYS`, `hermes_cli/config.py`) — the key was never in
+  `DEFAULT_CONFIG`, so `config set` printed a false "not a recognized config
+  key" warning without `--force`; regression tests in
+  `tests/hermes_cli/test_set_config_value.py` (`TestProviderRoutingSchema`).
+  Adds `hermes_cli/config.py` to this entry's weekly-merge conflict surface.
 - **Summary:** three cooperating config axes for OpenRouter. (1)
   `provider_routing.models.<model>.<key>` — per-model overlay over the flat
   provider-routing keys (`only`/`ignore`/`order`/`sort`/
