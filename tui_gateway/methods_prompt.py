@@ -1478,9 +1478,14 @@ def _(rid, params: dict) -> dict:
                 else None
             )
             try:
-                result = AIAgent(
-                    **_background_agent_kwargs(session["agent"], task_id)
-                ).run_conversation(
+                kwargs = _background_agent_kwargs(session["agent"], task_id)
+                # * Bind the surface escalation config, then hard-gate it —
+                # background tasks stay off the TTFT ladder (gateway /bg parity).
+                kwargs["service_tier_escalation"] = _load_service_tier_escalation()
+                bg_agent = AIAgent(**kwargs)
+                bg_agent._block_service_tier_escalation = True
+                bg_agent._config_managed_routing_tier = True
+                result = bg_agent.run_conversation(
                     user_message=text,
                     task_id=task_id,
                 )

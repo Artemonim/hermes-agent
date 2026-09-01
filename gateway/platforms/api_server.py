@@ -3255,6 +3255,11 @@ class APIServerAdapter(BasePlatformAdapter):
             agent_kwargs["service_tier"] = request_service_tier
 
         agent = AIAgent(**agent_kwargs)
+        agent._config_managed_routing_tier = True
+        if request_service_tier is not _REQUEST_OPTION_MISSING:
+            # * Request-scoped model_options.service_tier is a surface pin:
+            #   the value survives fallback/restore; wire form still remaps.
+            agent._service_tier_session_pinned = True
         agent._hermes_api_runtime = {
             "provider": runtime_kwargs.get("provider") or getattr(agent, "provider", "") or "",
             "model": getattr(agent, "model", None) or model,

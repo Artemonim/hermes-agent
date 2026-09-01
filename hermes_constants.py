@@ -4,12 +4,14 @@ Import-safe module with no dependencies — can be imported from anywhere
 without risk of circular imports.
 """
 
+import math
 import os
 import shutil
 import stat
 import sys
 from contextvars import ContextVar, Token
 from pathlib import Path
+from typing import NamedTuple
 
 
 _profile_fallback_warned: bool = False
@@ -1320,6 +1322,124 @@ _SERVICE_TIER_ALIASES = {
 }
 
 
+class ServiceTierEscalationConfig(NamedTuple):
+    """Validated ``agent.service_tier_escalation`` settings (opt-in TTFT ladder)."""
+
+    enabled: bool = False
+    ttft_threshold_seconds: float = 8.0
+    consecutive_slow_requests: int = 1
+
+
+DEFAULT_SERVICE_TIER_ESCALATION = ServiceTierEscalationConfig()
+
+
+def resolve_service_tier_escalation_config(agent_cfg) -> ServiceTierEscalationConfig:
+    """Parse ``agent.service_tier_escalation`` with safe defaults.
+
+    Invalid values log a warning and fall back to the matching default
+    (disabled / 8.0s / 1). Missing or non-dict sections return the
+    disabled default without raising.
+    """
+    defaults = DEFAULT_SERVICE_TIER_ESCALATION
+    if not isinstance(agent_cfg, dict):
+        return defaults
+    raw = agent_cfg.get("service_tier_escalation")
+    if raw is None:
+        return defaults
+    if not isinstance(raw, dict):
+        import logging
+        logging.getLogger(__name__).warning(
+            "Invalid agent.service_tier_escalation (expected mapping), "
+            "using disabled defaults",
+        )
+        return defaults
+
+    enabled, enabled_ok = _coerce_escalation_enabled(raw.get("enabled", False))
+    if not enabled_ok:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Invalid agent.service_tier_escalation.enabled %r, defaulting to false",
+            raw.get("enabled"),
+        )
+
+    threshold, threshold_ok = _coerce_escalation_threshold(
+        raw.get("ttft_threshold_seconds", defaults.ttft_threshold_seconds),
+    )
+    if not threshold_ok:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Invalid agent.service_tier_escalation.ttft_threshold_seconds %r, "
+            "defaulting to %s",
+            raw.get("ttft_threshold_seconds"),
+            defaults.ttft_threshold_seconds,
+        )
+
+    consecutive, consecutive_ok = _coerce_escalation_consecutive(
+        raw.get("consecutive_slow_requests", defaults.consecutive_slow_requests),
+    )
+    if not consecutive_ok:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Invalid agent.service_tier_escalation.consecutive_slow_requests %r, "
+            "defaulting to %s",
+            raw.get("consecutive_slow_requests"),
+            defaults.consecutive_slow_requests,
+        )
+
+    return ServiceTierEscalationConfig(
+        enabled=enabled,
+        ttft_threshold_seconds=threshold,
+        consecutive_slow_requests=consecutive,
+    )
+
+
+def _coerce_escalation_enabled(value) -> tuple[bool, bool]:
+    """Return ``(enabled, valid)``. Invalid → ``(False, False)``."""
+    if isinstance(value, bool):
+        return value, True
+    if isinstance(value, (int, float)) and value in (0, 1) and not isinstance(value, bool):
+        return bool(value), True
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "on", "1"}:
+            return True, True
+        if normalized in {"false", "no", "off", "0", ""}:
+            return False, True
+    if value is None:
+        return False, True
+    return False, False
+
+
+def _coerce_escalation_threshold(value) -> tuple[float, bool]:
+    """Return ``(seconds, valid)``. Must be a finite number ``> 0``."""
+    # * bool is a subclass of int; float(True) == 1.0 must not count as valid.
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return DEFAULT_SERVICE_TIER_ESCALATION.ttft_threshold_seconds, False
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_SERVICE_TIER_ESCALATION.ttft_threshold_seconds, False
+    if not math.isfinite(parsed) or parsed <= 0:
+        return DEFAULT_SERVICE_TIER_ESCALATION.ttft_threshold_seconds, False
+    return parsed, True
+
+
+def _coerce_escalation_consecutive(value) -> tuple[int, bool]:
+    """Return ``(count, valid)``. Must be an integer ``>= 1``."""
+    if isinstance(value, bool):
+        return DEFAULT_SERVICE_TIER_ESCALATION.consecutive_slow_requests, False
+    try:
+        parsed_float = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_SERVICE_TIER_ESCALATION.consecutive_slow_requests, False
+    if not math.isfinite(parsed_float) or parsed_float != int(parsed_float):
+        return DEFAULT_SERVICE_TIER_ESCALATION.consecutive_slow_requests, False
+    parsed = int(parsed_float)
+    if parsed < 1:
+        return DEFAULT_SERVICE_TIER_ESCALATION.consecutive_slow_requests, False
+    return parsed, True
+
+
 def parse_service_tier(value) -> str | None:
     """Normalize a configured service tier to a supported wire value.
 
@@ -1567,6 +1687,112 @@ def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:
             "Unknown reasoning_effort '%s', using default (medium)", effort
         )
     return result
+
+
+def resolve_provider_routing_for_model(routing, model: str = "") -> dict:
+    """Return wire-ready provider routing for *model* (no ``models`` key).
+
+    Flat keys on ``provider_routing`` are the defaults. When ``models`` has an
+    exact-match entry for *model* (the API model id string), each listed
+    overlay key replaces the corresponding flat key independently; omitted
+    overlay keys fall through to the flat value. ``models`` itself is never
+    part of the result — it is not a valid OpenRouter ``extra_body.provider``
+    field.
+    """
+    if not isinstance(routing, dict):
+        return {}
+    resolved = {key: value for key, value in routing.items() if key != "models"}
+    overlay_root = routing.get("models")
+    if not isinstance(overlay_root, dict):
+        return resolved
+    model_key = str(model or "")
+    if not model_key:
+        return resolved
+    overlay = overlay_root.get(model_key)
+    if not isinstance(overlay, dict):
+        return resolved
+    for overlay_key, overlay_value in overlay.items():
+        if overlay_key == "models":
+            continue
+        resolved[overlay_key] = overlay_value
+    return resolved
+
+
+def provider_routing_constructor_kwargs(routing, model: str = "") -> dict:
+    """Map resolved provider_routing keys onto AIAgent constructor names."""
+    resolved = resolve_provider_routing_for_model(routing, model)
+    return {
+        "providers_allowed": resolved.get("only"),
+        "providers_ignored": resolved.get("ignore"),
+        "providers_order": resolved.get("order"),
+        "provider_sort": resolved.get("sort"),
+        "provider_require_parameters": resolved.get("require_parameters", False),
+        "provider_data_collection": resolved.get("data_collection"),
+    }
+
+
+def apply_provider_routing_to_agent(agent, routing, model: str = "") -> dict:
+    """Store raw routing on *agent* and apply the per-model overlay attrs.
+
+    Returns the constructor-kwargs dict that was written onto the agent.
+    """
+    raw = routing if isinstance(routing, dict) else {}
+    try:
+        agent._provider_routing_config = raw
+    except Exception:
+        pass
+    kwargs = provider_routing_constructor_kwargs(raw, model)
+    for name, value in kwargs.items():
+        try:
+            setattr(agent, name, value)
+        except Exception:
+            pass
+    return kwargs
+
+
+def resolve_service_tier_for_model(agent_cfg, model: str = "") -> str | None:
+    """Resolve effective service tier: per-model override, else global.
+
+    Session pins are applied by callers *before* this function. Values go
+    through :func:`parse_service_tier` (``flex`` / ``priority``, aliases;
+    ``normal`` / ``default`` / empty → ``None``). An invalid per-model value
+    logs a warning and falls back to ``agent.service_tier``; an invalid
+    global value logs a warning and returns ``None``.
+    """
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+
+    overrides = agent_cfg.get("service_tier_overrides")
+    model_key = str(model or "")
+    if isinstance(overrides, dict) and model_key and model_key in overrides:
+        raw_override = overrides[model_key]
+        parsed_override = parse_service_tier(raw_override)
+        if parsed_override is not None:
+            return parsed_override
+        normalized = str(raw_override or "").strip().lower()
+        if not normalized or normalized in SERVICE_TIER_DISABLED_VALUES:
+            return None
+        import logging
+        logging.getLogger(__name__).warning(
+            "Unknown service_tier override '%s' for model '%s', "
+            "falling back to agent.service_tier",
+            raw_override,
+            model_key,
+        )
+
+    raw_global = agent_cfg.get("service_tier", "")
+    parsed_global = parse_service_tier(raw_global)
+    if parsed_global is not None:
+        return parsed_global
+    normalized_global = str(raw_global or "").strip().lower()
+    if not normalized_global or normalized_global in SERVICE_TIER_DISABLED_VALUES:
+        return None
+    import logging
+    logging.getLogger(__name__).warning(
+        "Unknown service_tier '%s', ignoring",
+        raw_global,
+    )
+    return None
 
 
 def is_termux() -> bool:

@@ -1908,6 +1908,22 @@ def _notify_context_engine_turn_complete(
         )
 
 
+def _try_accept_logical_request(agent: Any) -> None:
+    """Commit a parked TTFT when the outer loop accepts this logical request.
+
+    Used on inject-and-continue paths (history mutated; next API call is a
+    new logical request) as well as the successful tool-call / content
+    accept sites. Outer-loop pure retries must not call this — they keep
+    ``wire_locked`` so the pre-attempt tier stays on the wire.
+    """
+    try:
+        from agent.service_tier_escalation import accept_logical_request
+
+        accept_logical_request(agent)
+    except Exception:
+        pass
+
+
 def run_conversation(
     agent,
     user_message: Any,
@@ -2068,6 +2084,16 @@ def run_conversation(
     _should_review_memory = _ctx.should_review_memory
     _plugin_user_context = _ctx.plugin_user_context
     _ext_prefetch_cache = _ctx.ext_prefetch_cache
+
+    # * Reset TTFT ladder after primary restore so the turn's base is the
+    # live runtime model, not a leftover fallback overlay. An abnormal
+    # previous exit cannot leave an escalated tier on the next user prompt.
+    try:
+        from agent.service_tier_escalation import begin_escalation_turn
+
+        begin_escalation_turn(agent)
+    except Exception:
+        pass
 
     # Commentary deduplication spans all provider continuations and tool calls
     # within one user turn, but must not suppress the same phrase next turn.
@@ -3174,6 +3200,12 @@ def run_conversation(
                         tools_for_api=tools_for_api,
                     )
                 )
+                try:
+                    from agent.service_tier_escalation import begin_logical_request
+
+                    begin_logical_request(agent)
+                except Exception:
+                    pass
                 if tools_for_api == agent.tools:
                     api_kwargs = agent._build_api_kwargs(api_messages)
                 else:
@@ -3394,10 +3426,33 @@ def run_conversation(
                             is_github_responses=agent._is_copilot_url(),
                             sanitize_harmony_tokens=agent._is_codex_backend(),
                         )
+                    from agent.service_tier_escalation import (
+                        begin_request_ttft,
+                        end_request_ttft,
+                        finish_request_ttft,
+                        note_non_observation,
+                    )
+
                     if _use_streaming:
-                        return agent._interruptible_streaming_api_call(
-                            next_api_kwargs, on_first_delta=_stop_spinner
-                        )
+                        obs = begin_request_ttft(agent)
+                        try:
+                            result = agent._interruptible_streaming_api_call(
+                                next_api_kwargs, on_first_delta=_stop_spinner
+                            )
+                            finish_request_ttft(
+                                agent,
+                                obs,
+                                interrupted=bool(
+                                    getattr(agent, "_interrupt_requested", False)
+                                ),
+                            )
+                            return result
+                        except Exception:
+                            note_non_observation(agent)
+                            raise
+                        finally:
+                            end_request_ttft(agent, obs)
+                    note_non_observation(agent)
                     from agent import relay_llm
 
                     return relay_llm.execute(
@@ -7208,6 +7263,7 @@ def run_conversation(
                 interim_has_codex_reasoning = bool(interim_msg.get("codex_reasoning_items"))
                 interim_has_codex_message_items = bool(interim_msg.get("codex_message_items"))
 
+                _codex_history_mutated = False
                 if (
                     interim_has_content
                     or interim_has_reasoning
@@ -7269,9 +7325,11 @@ def run_conversation(
                                     )
                                 else:
                                     last_msg[_key] = interim_msg[_key]
+                        _codex_history_mutated = True
                     else:
                         append_message(messages, interim_msg)
                         agent._emit_interim_assistant_message(interim_msg)
+                        _codex_history_mutated = True
 
                 if agent._codex_incomplete_retries < 3:
                     # When the interim message has nothing the Responses
@@ -7334,6 +7392,7 @@ def run_conversation(
                                 "role": "user",
                                 "content": _CODEX_INCOMPLETE_NUDGE,
                             })
+                            _codex_history_mutated = True
                     if not agent.quiet_mode:
                         agent._vprint(f"{agent.log_prefix}↻ Codex response incomplete; continuing turn ({agent._codex_incomplete_retries}/3)")
                     # Surface the continuation on the live spinner/status line
@@ -7347,6 +7406,10 @@ def run_conversation(
                         f"({agent._codex_incomplete_retries}/3)"
                     )
                     agent._session_messages = messages
+                    # * Accept only when history changed; a no-op incomplete
+                    # retry is the same logical request (keep the wire lock).
+                    if _codex_history_mutated:
+                        _try_accept_logical_request(agent)
                     continue
 
                 agent._codex_incomplete_retries = 0
@@ -7467,6 +7530,9 @@ def run_conversation(
                             "tool_call_id": coalesce_tool_call_id(tc),
                             "content": content,
                         })
+                    # * Malformed tool-name response is in history; the next
+                    # call is a recovery request, not a retry of this one.
+                    _try_accept_logical_request(agent)
                     continue
                 # Reset retry counter on successful tool call validation
                 agent._invalid_tool_retries = 0
@@ -7571,10 +7637,14 @@ def run_conversation(
                                 "tool_call_id": coalesce_tool_call_id(tc),
                                 "content": tool_result,
                             })
+                        # * Recovery tool results are in history; next call
+                        # is a new logical request.
+                        _try_accept_logical_request(agent)
                         continue
                 
                 # Reset retry counter on successful JSON validation
                 agent._invalid_json_retries = 0
+                _try_accept_logical_request(agent)
 
                 # ── Post-call guardrails ──────────────────────────
                 assistant_message.tool_calls = agent._cap_delegate_task_calls(
@@ -8143,6 +8213,8 @@ def run_conversation(
                             "content": _EMPTY_TOOL_RESPONSE_NUDGE,
                             "_empty_recovery_synthetic": True,
                         })
+                        # * Empty assistant + user nudge are in history.
+                        _try_accept_logical_request(agent)
                         continue
 
                     # ── Thinking-only prefill continuation ──────────
@@ -8177,6 +8249,9 @@ def run_conversation(
                         interim_msg["_thinking_prefill"] = True
                         append_message(messages, interim_msg)
                         agent._session_messages = messages
+                        # * Prefill assistant turn is in history; next call
+                        # continues from that prefix.
+                        _try_accept_logical_request(agent)
                         continue
 
                     # ── Empty response retry ──────────────────────
@@ -8413,6 +8488,7 @@ def run_conversation(
                 # Reset retry counter/signature on successful content
                 agent._empty_content_retries = 0
                 agent._thinking_prefill_retries = 0
+                _try_accept_logical_request(agent)
                 # Successful content reached — surface the one-shot fallback
                 # switch notice (if a fallback activated this turn) before
                 # dropping the noisy retry buffer, so a provider/model switch

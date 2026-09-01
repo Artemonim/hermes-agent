@@ -165,6 +165,22 @@ provider_routing:
   require_parameters: true
 ```
 
+### Per-Model Routing Overrides
+
+Use `provider_routing.models.<model>` when one model needs its own routing without changing the flat defaults every other model inherits. The key is the exact model id (as sent to the API); its entries win over the flat keys **per key** — anything you don't list falls through to the flat defaults:
+
+```yaml
+provider_routing:
+  sort: throughput                    # flat default for all models
+  models:
+    google/gemini-3.7-flash:
+      only: ["google-ai-studio"]      # hard-pin this model to one provider
+    qwen/qwen3.8-27b:
+      order: ["reka/fp8"]             # soft preference, fallbacks allowed
+```
+
+Per-model overrides apply on every surface (CLI, messaging gateway, TUI, Desktop) and are re-resolved automatically on a mid-session `/model` switch. Pinning a provider per model also keeps OpenRouter's prompt cache warm: repeatedly hitting the same upstream provider preserves the cached prefix, while load-balancing across providers loses it.
+
 ## How It Works
 
 Provider routing preferences are passed to OpenRouter or Nous Portal on agent chat requests and iteration-limit summaries via the `extra_body.provider` field. (`extra_body` is the OpenAI Python SDK argument; it becomes the top-level `provider` object in the JSON request.) Auxiliary tasks are configured independently: `auxiliary.<task>.providers` is the concise ordered-provider form for OpenRouter, while `auxiliary.<task>.extra_body` remains available for the full routing object.

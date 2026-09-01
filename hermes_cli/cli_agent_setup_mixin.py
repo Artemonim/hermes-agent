@@ -324,6 +324,7 @@ class CLIAgentSetupMixin:
         call is marked accordingly.
         """
         from hermes_cli.models import resolve_service_tier_overrides
+        from hermes_constants import resolve_service_tier_for_model
 
         runtime = {
             "api_key": self.api_key,
@@ -351,7 +352,17 @@ class CLIAgentSetupMixin:
             ),
         }
 
-        service_tier = getattr(self, "service_tier", None)
+        if getattr(self, "_service_tier_session_pinned", False):
+            service_tier = getattr(self, "service_tier", None)
+        else:
+            _cfg = getattr(self, "config", None)
+            if isinstance(_cfg, dict) and isinstance(_cfg.get("agent"), dict):
+                service_tier = resolve_service_tier_for_model(
+                    _cfg["agent"], route["model"]
+                )
+                self.service_tier = service_tier
+            else:
+                service_tier = getattr(self, "service_tier", None)
         if not service_tier:
             route["request_overrides"] = None
             return route
@@ -520,6 +531,29 @@ class CLIAgentSetupMixin:
                 "credential_pool": getattr(self, "_credential_pool", None),
             }
             effective_model = model_override or self.model
+            from hermes_constants import (
+                apply_provider_routing_to_agent,
+                resolve_provider_routing_for_model,
+                resolve_service_tier_for_model,
+            )
+            _raw_pr = getattr(self, "_provider_routing_raw", None)
+            if not isinstance(_raw_pr, dict):
+                _cfg = getattr(self, "config", None) or {}
+                _raw_pr = _cfg.get("provider_routing") or {}
+                self._provider_routing_raw = _raw_pr if isinstance(_raw_pr, dict) else {}
+            _pr = resolve_provider_routing_for_model(self._provider_routing_raw, effective_model)
+            self._provider_sort = _pr.get("sort")
+            self._providers_only = _pr.get("only")
+            self._providers_ignore = _pr.get("ignore")
+            self._providers_order = _pr.get("order")
+            self._provider_require_params = _pr.get("require_parameters", False)
+            self._provider_data_collection = _pr.get("data_collection")
+            if not getattr(self, "_service_tier_session_pinned", False):
+                _cfg = getattr(self, "config", None) or {}
+                _agent_cfg = _cfg.get("agent") if isinstance(_cfg.get("agent"), dict) else {}
+                self.service_tier = resolve_service_tier_for_model(
+                    _agent_cfg, effective_model
+                )
             self.agent = AIAgent(
                 model=effective_model,
                 api_key=runtime.get("api_key"),
@@ -542,6 +576,9 @@ class CLIAgentSetupMixin:
                 prefill_messages=self.prefill_messages or None,
                 reasoning_config=self.reasoning_config,
                 service_tier=self.service_tier,
+                service_tier_escalation=getattr(
+                    self, "_service_tier_escalation_cfg", None
+                ),
                 request_overrides=request_overrides,
                 providers_allowed=self._providers_only,
                 providers_ignored=self._providers_ignore,
@@ -582,6 +619,20 @@ class CLIAgentSetupMixin:
                 notice_clear_callback=self._on_notice_clear,
                 reaction_callback=self._on_reaction,
             )
+            apply_provider_routing_to_agent(
+                self.agent,
+                self._provider_routing_raw,
+                effective_model,
+            )
+            _agent_cfg = getattr(self, "config", None)
+            if isinstance(_agent_cfg, dict):
+                _agent_cfg = _agent_cfg.get("agent")
+            if isinstance(_agent_cfg, dict):
+                self.agent._agent_config = _agent_cfg
+            self.agent._service_tier_session_pinned = bool(
+                getattr(self, "_service_tier_session_pinned", False)
+            )
+            self.agent._config_managed_routing_tier = True
             # Store reference for atexit memory provider shutdown.
             # NOTE: this MUST write to the ``cli`` module's global, not a
             # local module global. ``_run_cleanup`` (in cli.py) reads
