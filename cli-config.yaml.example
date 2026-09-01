@@ -313,6 +313,8 @@ model:
 #   # not as a whole block: keys you don't list fall through to the flat
 #   # defaults. Applies on every surface (CLI, messaging gateway, TUI and
 #   # Desktop) and is re-resolved on a mid-session /model switch.
+#   # NOTE: model ids contain dots, so dotted `config set` cannot reach them --
+#   # set the section as a whole JSON blob or edit YAML directly.
 #   models:
 #     google/gemini-3.7-flash:
 #       only: ["google-ai-studio"]   # hard-pin this model to one provider
