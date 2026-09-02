@@ -1,6 +1,7 @@
 """Tests for hermes_constants module."""
 
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -32,19 +33,26 @@ from hermes_constants import (
 )
 
 
+def _symlink_or_skip(link: Path, target: Path, *, target_is_directory: bool = False) -> None:
+    """Create a symlink, or skip on Windows when the process lacks the privilege."""
+    try:
+        link.symlink_to(target, target_is_directory=target_is_directory)
+    except OSError as exc:
+        if getattr(exc, "winerror", None) == 1314:
+            pytest.skip("Windows symlink privilege not granted")
+        raise
+
+
 class TestGetDefaultHermesRoot:
     """Tests for get_default_hermes_root() — Docker/custom deployment awareness."""
 
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX ~/.hermes; Windows uses %LOCALAPPDATA%\\hermes")
     def test_no_hermes_home_returns_native(self, tmp_path, monkeypatch):
         """When HERMES_HOME is not set, returns ~/.hermes."""
         monkeypatch.delenv("HERMES_HOME", raising=False)
         monkeypatch.setattr(Path, "home", lambda: tmp_path)
 
         assert get_default_hermes_root() == tmp_path / ".hermes"
-
-
-
-
 
     def test_docker_profile_active(self, tmp_path, monkeypatch):
         """When a Docker profile is active (HERMES_HOME=<root>/profiles/<name>),
@@ -972,7 +980,7 @@ class TestGetHermesDir:
         """
         self._set_home(tmp_path, monkeypatch)
         legacy = tmp_path / "pairing"
-        legacy.symlink_to(tmp_path / "does-not-exist")
+        _symlink_or_skip(legacy, tmp_path / "does-not-exist")
         new = tmp_path / "platforms" / "pairing"
         new.mkdir(parents=True)
         (new / "discord-approved.json").write_text("[]")
@@ -986,7 +994,7 @@ class TestGetHermesDir:
         real.mkdir()
         (real / "cached.png").write_bytes(b"x")
         legacy = tmp_path / "image_cache"
-        legacy.symlink_to(real)
+        _symlink_or_skip(legacy, real, target_is_directory=True)
         result = get_hermes_dir("cache/images", "image_cache")
         assert result == legacy
 

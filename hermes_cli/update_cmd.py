@@ -574,6 +574,84 @@ _UPDATE_CRITICAL_FILES = (
     "hermes_constants.py",
 )
 
+_ORPHAN_RESCUE_REFS_TO_KEEP = 10
+_ORPHAN_RESCUE_REF_MAX_AGE_DAYS = 30
+
+
+def _prune_orphan_rescue_refs(
+    git_cmd,
+    cwd,
+    branch,
+    keep=_ORPHAN_RESCUE_REFS_TO_KEEP,
+    max_age_days=_ORPHAN_RESCUE_REF_MAX_AGE_DAYS,
+) -> None:
+    """Expire old orphan rescue refs so backups stay bounded.
+
+    Each orphan-history divergence (#87694) parks the pre-reset HEAD under
+    ``refs/hermes-update-backups/orphan-<branch>-<ts>-<sha>``. A rescue ref
+    pins every object reachable from that commit against ``git gc`` — and in
+    the incident shape those objects include a full working-tree snapshot
+    (the autostash orphan commit), which can be multi-GB when the tree holds
+    large stray files. Left alone, a repeatedly corrupted install would grow
+    ``.git`` without bound.
+
+    Two independent limits, both enforced on every orphan incident:
+
+    - **Count cap:** keep only the ``keep`` most-recent refs.
+    - **Age expiry:** drop any ref older than ``max_age_days``, parsed from
+      the ``YYYYMMDD-HHMMSS`` timestamp embedded in the ref name (refs with
+      unparseable names are left alone rather than guessed at).
+
+    Ref names sort chronologically (timestamp prefix), so lexicographic
+    order from ``for-each-ref`` is also creation order. Deleting a ref makes
+    its objects eligible for ``git gc``; actual disk reclaim happens on the
+    next gc (git auto-gc, or the user running ``git gc``). Best-effort: any
+    failure here must not block the update itself.
+    """
+    try:
+        list_result = subprocess.run(
+            git_cmd + [
+                "for-each-ref",
+                "--format=%(refname)",
+                "--sort=refname",
+                f"refs/hermes-update-backups/orphan-{branch}-*",
+            ],
+            cwd=cwd,
+            capture_output=True,
+            text=True, encoding="utf-8", errors="replace",
+        )
+        if list_result.returncode != 0:
+            return
+        refs = [line.strip() for line in list_result.stdout.splitlines() if line.strip()]
+        stale = set(refs[:-keep] if keep > 0 else refs)
+        # Age expiry: ref names embed a UTC YYYYMMDD-HHMMSS timestamp right
+        # after the branch segment; anything older than max_age_days goes.
+        if max_age_days > 0:
+            from datetime import timedelta, timezone
+
+            cutoff = datetime.now(timezone.utc) - timedelta(days=max_age_days)
+            prefix = f"refs/hermes-update-backups/orphan-{branch}-"
+            for ref in refs:
+                stamp = ref[len(prefix):][:15]  # "YYYYMMDD-HHMMSS"
+                try:
+                    ref_time = datetime.strptime(stamp, "%Y%m%d-%H%M%S").replace(
+                        tzinfo=timezone.utc
+                    )
+                except ValueError:
+                    continue
+                if ref_time < cutoff:
+                    stale.add(ref)
+        for ref in sorted(stale):
+            subprocess.run(
+                git_cmd + ["update-ref", "-d", ref],
+                cwd=cwd,
+                capture_output=True,
+                text=True, encoding="utf-8", errors="replace",
+            )
+    except OSError:
+        pass
+
+
 def _capture_head_sha(git_cmd, cwd) -> str | None:
     """Return the current HEAD SHA, or None if it can't be resolved."""
     try:
@@ -1970,6 +2048,276 @@ def _clear_stale_sqlite_sidecars(db_path: Path) -> None:
     """
     for suffix in ("-wal", "-shm", "-journal"):
         db_path.with_name(db_path.name + suffix).unlink(missing_ok=True)
+
+
+def _post_update_sqlite_runtime_status():
+    """Return whether the interpreter used after update has safe SQLite."""
+    from hermes_constants import project_venv_dir
+    from hermes_cli.sqlite_runtime import probe_sqlite_runtime
+
+    venv_dir = project_venv_dir(_m().PROJECT_ROOT)
+    python = (
+        venv_python_path(venv_dir, windows=_m()._is_windows())
+        if venv_dir is not None
+        else Path(sys.executable)
+    )
+    info = probe_sqlite_runtime(python)
+    return info is not None and not info.wal_reset_vulnerable, info
+
+
+def _print_verified_update_completion(message: str) -> bool:
+    """Print a success completion only after probing the next Hermes runtime."""
+    if not message.startswith("✓"):
+        _print_update_completion(message)
+        return False
+    sqlite_runtime_ok, sqlite_info = _post_update_sqlite_runtime_status()
+    if sqlite_info is None:
+        # Grace path: an unprobeable interpreter (no venv in a dev checkout,
+        # probe subprocess unavailable) must not fail an otherwise-successful
+        # update — only a POSITIVE vulnerable probe withholds success
+        # (same contract as _venv_core_imports_healthy's unknown states).
+        logger.debug("Post-update SQLite runtime probe unavailable; not blocking")
+        _print_update_completion(message)
+        return True
+    if sqlite_runtime_ok:
+        _print_update_completion(message)
+        return True
+    print()
+    detail = (
+        f"SQLite {sqlite_info.sqlite_version_string} still has the "
+        "WAL-reset corruption bug"
+    )
+    print(f"⚠ Update partially complete — {detail}.")
+    print(
+        "  Rebuild the Hermes venv with a uv-managed Python, restart Hermes, "
+        "then verify with `hermes doctor`."
+    )
+    return False
+
+
+def _path_uid(path) -> Optional[int]:
+    """Owner uid of ``path`` via ``os.stat`` — ``None`` when unreadable.
+
+    Separate seam so tests can simulate root-owned files without chown
+    (which needs root). Never raises.
+    """
+    try:
+        return os.stat(path, follow_symlinks=False).st_uid
+    except OSError:
+        return None
+
+
+def _venv_foreign_owned_paths(venv_root, limit: int = 5) -> list:
+    """Bounded scan for venv entries not owned by the current user (#83529).
+
+    A venv that was ever touched by ``sudo pip`` / ``sudo hermes`` contains
+    root-owned files (classically ``*.dist-info/INSTALLER``). A later normal
+    ``hermes update`` then dies mid-mutation inside ``uv pip install -e .``
+    ("Permission denied (os error 13)") with ``venv/bin/hermes`` already
+    deleted — the CLI is bricked. Same philosophy as the contended-venv gate
+    (#87331): a venv we cannot safely mutate is never mutated at all.
+
+    Checks a deliberately BOUNDED set (no full recursion — must never be
+    slow): the venv root, each direct entry of ``venv/bin``, the top-level
+    entries of the first ``lib/python*/site-packages`` found, and the direct
+    children of each ``*.dist-info`` there. Caps stat calls at ~2000 and
+    returned paths at ``limit``. POSIX-only: returns ``[]`` on Windows
+    (no ``os.geteuid``) and when running as root. Swallows every per-entry
+    ``OSError`` and returns ``[]`` on any structural surprise — this helper
+    must NEVER raise and must never add noticeable latency to update.
+
+    Returns a list of ``(path_str, uid)`` tuples, at most ``limit`` long.
+    """
+    try:
+        if not hasattr(os, "geteuid"):
+            return []  # windows-footgun: ok — POSIX ownership concept only
+        euid = os.geteuid()  # windows-footgun: ok — guarded by hasattr above
+        if euid == 0:
+            return []  # root can rewrite anything; nothing to refuse
+
+        venv_root = Path(venv_root)
+        budget = 2000  # max stat() calls — hard bound on preflight cost
+        foreign: list = []
+
+        def _check(p) -> bool:
+            """stat one path; True while scan should continue."""
+            nonlocal budget
+            if budget <= 0 or len(foreign) >= limit:
+                return False
+            budget -= 1
+            uid = _path_uid(p)
+            if uid is not None and uid != euid:
+                foreign.append((str(p), uid))
+            return budget > 0 and len(foreign) < limit
+
+        def _scan_dir(d, recurse_dist_info: bool = False) -> None:
+            try:
+                entries = list(os.scandir(d))
+            except OSError:
+                return
+            for entry in entries:
+                if not _check(entry.path):
+                    return
+                if recurse_dist_info and entry.name.endswith(".dist-info"):
+                    try:
+                        children = list(os.scandir(entry.path))
+                    except OSError:
+                        continue
+                    for child in children:
+                        if not _check(child.path):
+                            return
+
+        if not _check(venv_root):
+            return foreign[:limit]
+        _scan_dir(venv_root / "bin")
+
+        # First lib/python*/site-packages (POSIX venv layout).
+        site_packages = next(
+            iter(sorted(venv_root.glob("lib/python*/site-packages"))), None
+        )
+        if site_packages is not None:
+            _scan_dir(site_packages, recurse_dist_info=True)
+
+        return foreign[:limit]
+    except Exception:
+        # Preflight is advisory: any structural surprise means "no verdict",
+        # never a crashed or blocked update.
+        return []
+
+
+def _refuse_update_if_venv_foreign_owned(project_root) -> None:
+    """Refuse-before-mutate ownership gate for the dependency install (#83529).
+
+    Runs after the code pull (pulling code is safe) and immediately before
+    the first venv mutation. If the venv contains files owned by another
+    uid, the ``uv pip install -e .`` below would die mid-mutation and brick
+    the install — so refuse up front, with the exact recovery command,
+    while the venv is still fully intact. No subprocess calls here: update
+    tests mock ``subprocess.run`` with sequenced side effects.
+    """
+    foreign = _venv_foreign_owned_paths(Path(project_root) / "venv")
+    if not foreign:
+        return
+    print("\n✗ Update stopped: this install's venv contains files owned by another user.")
+    print("  Updating now would fail midway (Permission denied) and leave Hermes broken.")
+    print("  This usually happens after running hermes or pip with sudo. Offending paths:")
+    for p, uid in foreign:
+        print(f"    - {p} (owner uid {uid})")
+    print("\n  Fix ownership, then re-run the update:")
+    print(f"    sudo chown -R $(id -un): {project_root}")
+    print("    hermes update")
+    print("\n  Nothing in the venv was modified.")
+    sys.exit(1)
+
+
+def _refuse_gateway_ancestor_tree_kill(
+    pids: list[int], *, gateway_mode: bool
+) -> bool:
+    """Refuse a plain Windows update that would kill its own process tree.
+
+    A chat agent can launch plain ``hermes update`` through its terminal tool.
+    In that topology the updater is a child of the gateway.  The leftover
+    holder recovery below uses ``taskkill /T /F`` on Windows, so force-stopping
+    that gateway also kills the updater before it can mutate the checkout
+    (#98814).
+
+    ``/update`` uses the supported ``--gateway`` hand-off and is deliberately
+    exempt: it detaches the updater and provides file-based progress/result
+    delivery.  For every other invocation, refuse only when a nominated
+    gateway is positively identified as this process's ancestor.  If ancestry
+    cannot be established, preserve the existing holder recovery behavior.
+    """
+    if gateway_mode or not pids:
+        return False
+
+    try:
+        from hermes_cli.gateway import _is_pid_ancestor_of_current_process
+
+        ancestors = [
+            int(pid)
+            for pid in pids
+            if _is_pid_ancestor_of_current_process(int(pid))
+        ]
+    except Exception as exc:
+        logger.debug("Could not inspect gateway ancestry before tree-kill: %s", exc)
+        return False
+
+    if not ancestors:
+        return False
+
+    rendered = ", ".join(str(pid) for pid in ancestors)
+    print(
+        "✗ Refusing to stop the gateway process tree because this updater "
+        f"is running inside it (gateway PID(s): {rendered})."
+    )
+    print(
+        "  On Windows, taskkill /T would terminate the updater before the "
+        "update can run."
+    )
+    print("  From a chat platform, use `/update` instead.")
+    print("  Otherwise, run `hermes update` from a separate terminal.")
+    return True
+
+
+def _drain_or_signal_gateway_for_update(
+    pid: int,
+    drain_budget: float,
+    label: str,
+) -> bool:
+    """Decide how ``hermes update`` hands a running gateway over to new code.
+
+    Three-way triage shared by the systemd and bare-process restart paths:
+
+    1. **Gateway is an ancestor of this process** — THREE-WAY DEADLOCK BREAK
+       (#100179). When ``hermes update`` runs INSIDE the gateway's own
+       process tree (the hermes-auto-update cron job is the canonical case),
+       waiting for that gateway to exit is a circular wait::
+
+           gateway  waits on all in-flight work units (#77184)
+             └─ cron agent session waits on the `hermes update` process
+                  └─ `hermes update` waits on the gateway to exit  ← back to A
+
+       The wedged-loop probe cannot break it: the cron session posts
+       activity every ~180s (process-tool poll return), so it is "actively
+       waiting forever" and never marked wedged — the gateway burns the full
+       force-drain cap (1800s) before killing its own updater's session.
+       Fire-and-forget instead: signal the restart and return immediately;
+       the gateway's own restart flow completes once THIS process (and
+       therefore the cron work unit holding it) exits.
+    2. **Event loop provably wedged** (#81642) — SIGUSR1 can never drain it;
+       bounded escalation (SIGTERM grace → SIGKILL) instead of burning the
+       full drain budget.
+    3. **Live, out-of-tree gateway** — the normal graceful SIGUSR1 drain,
+       waiting up to ``drain_budget`` for the process to exit (unchanged,
+       including the #86684 cron floor).
+
+    Returns True when the gateway was signalled/stopped successfully.
+    """
+    from hermes_cli.gateway import (
+        GATEWAY_LOOP_WEDGED,
+        _escalate_wedged_gateway,
+        _graceful_restart_via_sigusr1,
+        _is_pid_ancestor_of_current_process,
+        _request_gateway_self_restart,
+        probe_gateway_loop_liveness,
+    )
+
+    if _is_pid_ancestor_of_current_process(pid):
+        print(
+            f"  → {label}: update is running inside this gateway's "
+            "process tree — signalling restart and letting the gateway "
+            "drain itself (avoids the cron-update deadlock, #100179)"
+        )
+        return _request_gateway_self_restart(pid)
+    if probe_gateway_loop_liveness(pid) == GATEWAY_LOOP_WEDGED:
+        print(
+            f"  ⚠ {label}: gateway event loop is unresponsive — "
+            "skipping drain, forcing a bounded stop..."
+        )
+        _escalate_wedged_gateway(pid)
+        return True
+    print(f"  → {label}: draining (up to {int(drain_budget)}s)...")
+    return _graceful_restart_via_sigusr1(pid, drain_timeout=drain_budget)
 
 
 def _print_update_summary(

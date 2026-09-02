@@ -2974,6 +2974,51 @@ def sync_request_overrides_service_tier(agent) -> dict:
     return current
 
 
+def _apply_switched_provider_request_overrides(agent, new_provider):
+    """Re-derive the switched-to provider's ``request_overrides`` onto a live agent.
+
+    A ``custom_providers`` entry can carry an ``extra_body`` (e.g.
+    ``chat_template_kwargs`` to toggle a local model's thinking). The gateway
+    rebuild path carries this via ``request_overrides``; an *in-place* swap
+    (CLI / TUI ``/model``) must re-derive it for the switched-to provider,
+    otherwise the previous provider's ``extra_body`` lingers.
+
+    The switched-to entry is matched by **provider key, base_url, and model** —
+    the same condition ``agent_init._merge_custom_provider_extra_body`` applies
+    at build time — via the shared ``_custom_provider_extra_body_for_agent``
+    matcher. Matching by name alone would let a *different* model selected at the
+    same named endpoint inherit an ``extra_body`` configured for another model.
+    A stale ``extra_body`` is always cleared when the switched-to provider/model
+    resolves none; non-provider overrides (``service_tier`` / ``speed`` from
+    ``/fast``) are preserved.
+    """
+    from agent.agent_init import _custom_provider_extra_body_for_agent
+
+    # Prefer the init-time cache (agent_init stores ``agent._custom_providers``
+    # right where it runs its own _merge_custom_provider_extra_body); fall back
+    # to a fresh load only if a caller built the agent without it.
+    custom_providers = getattr(agent, "_custom_providers", None)
+    if custom_providers is None:
+        try:
+            from hermes_cli.config import load_config, get_compatible_custom_providers
+            custom_providers = get_compatible_custom_providers(load_config())
+        except Exception:
+            custom_providers = []
+
+    new_extra_body = _custom_provider_extra_body_for_agent(
+        provider=new_provider,
+        model=getattr(agent, "model", "") or "",
+        base_url=getattr(agent, "base_url", "") or "",
+        custom_providers=custom_providers or [],
+    )
+
+    overrides = dict(getattr(agent, "request_overrides", {}) or {})
+    overrides.pop("extra_body", None)  # always drop the previous provider's extra_body
+    if new_extra_body:
+        overrides["extra_body"] = dict(new_extra_body)
+    agent.request_overrides = overrides
+
+
 def resync_per_model_routing_and_tier(agent) -> None:
     """Re-apply provider routing and effective tier for the live ``agent.model``.
 
@@ -3043,60 +3088,7 @@ def resync_per_model_routing_and_tier(agent) -> None:
         )
 
 
-def _apply_switched_provider_request_overrides(agent, new_provider):
-    """Re-derive the switched-to provider's ``request_overrides`` onto a live agent.
-
-    A ``custom_providers`` entry can carry an ``extra_body`` (e.g.
-    ``chat_template_kwargs`` to toggle a local model's thinking). The gateway
-    rebuild path carries this via ``request_overrides``; an *in-place* swap
-    (CLI / TUI ``/model``) must re-derive it for the switched-to provider,
-    otherwise the previous provider's ``extra_body`` lingers.
-
-    The switched-to entry is matched by **provider key, base_url, and model** —
-    the same condition ``agent_init._merge_custom_provider_extra_body`` applies
-    at build time — via the shared ``_custom_provider_extra_body_for_agent``
-    matcher. Matching by name alone would let a *different* model selected at the
-    same named endpoint inherit an ``extra_body`` configured for another model.
-    A stale ``extra_body`` is always cleared when the switched-to provider/model
-    resolves none; non-provider overrides (``service_tier`` / ``speed`` from
-    ``/fast``) are preserved.
-    """
-    from agent.agent_init import _custom_provider_extra_body_for_agent
-
-    # Prefer the init-time cache (agent_init stores ``agent._custom_providers``
-    # right where it runs its own _merge_custom_provider_extra_body); fall back
-    # to a fresh load only if a caller built the agent without it.
-    custom_providers = getattr(agent, "_custom_providers", None)
-    if custom_providers is None:
-        try:
-            from hermes_cli.config import load_config, get_compatible_custom_providers
-            custom_providers = get_compatible_custom_providers(load_config())
-        except Exception:
-            custom_providers = []
-
-    new_extra_body = _custom_provider_extra_body_for_agent(
-        provider=new_provider,
-        model=getattr(agent, "model", "") or "",
-        base_url=getattr(agent, "base_url", "") or "",
-        custom_providers=custom_providers or [],
-    )
-
-    overrides = dict(getattr(agent, "request_overrides", {}) or {})
-    overrides.pop("extra_body", None)  # always drop the previous provider's extra_body
-    if new_extra_body:
-        overrides["extra_body"] = dict(new_extra_body)
-    agent.request_overrides = overrides
-
-
-def switch_model(
-    agent,
-    new_model,
-    new_provider,
-    api_key='',
-    base_url='',
-    api_mode='',
-    capabilities=None,
-):
+def switch_model(agent, new_model, new_provider, api_key='', base_url='', api_mode='', capabilities=None):
     """Switch the model/provider in-place for a live agent.
 
     Called by the /model command handlers (CLI and gateway) after

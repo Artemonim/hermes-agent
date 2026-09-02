@@ -86,7 +86,7 @@ async def test_voice_stt_still_runs_when_native_audio_is_staged():
             source=source,
             history=[],
         )
-    mock_stt.assert_called_once_with("/tmp/voice.ogg")
+    mock_stt.assert_called_once_with("/tmp/voice.ogg", None, "gateway")
     assert "hello world" in result
     assert runner._consume_pending_native_audio_paths(build_session_key(source)) == [
         "/tmp/voice.ogg"

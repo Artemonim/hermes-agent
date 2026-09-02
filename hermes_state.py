@@ -5417,6 +5417,12 @@ class SessionDB(SessionSearchMixin, SessionSchemaMixin, SessionPortabilityMixin)
         # out-of-band replace cannot limp through in-place surgery.
         # Inode catches mv/new-file; application_id catches cp onto the
         # same path (same inode, truncate+rewrite).
+        # One-shot guard for the runtime FTS rebuild recovery on the write
+        # path. A corrupt FTS shadow table makes EVERY message write raise
+        # the malformed/corrupt error class via the sync triggers; we repair
+        # in place at most once per SessionDB instance so a genuinely
+        # unrecoverable database can't put writers into a rebuild loop.
+        self._fts_runtime_rebuild_attempted = False
         self._db_file_identity: Optional[tuple] = None
         self._db_file_application_id: int = 0
         self._db_file_generation_token: str = ""

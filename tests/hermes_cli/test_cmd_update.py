@@ -296,6 +296,7 @@ class TestCmdUpdateBranchFallback:
         origin but behind NousResearch/hermes-agent silently misses updates.
         """
         from hermes_cli import main as hm
+        from hermes_cli import update_cmd
 
         mock_run.side_effect = _make_run_side_effect(
             branch="main", verify_ok=True, commit_count="0"
@@ -305,7 +306,11 @@ class TestCmdUpdateBranchFallback:
             hm,
             "_get_origin_url",
             return_value="https://github.com/example/hermes-agent.git",
-        ), patch.object(hm, "_sync_with_upstream_if_needed") as sync_mock:
+        ), patch.object(hm, "_sync_with_upstream_if_needed") as sync_mock, patch.object(
+            update_cmd, "_update_node_dependencies", return_value=[]
+        ), patch.object(
+            update_cmd, "_rebuild_desktop_after_update", return_value=True
+        ):
             cmd_update(mock_args)
 
         expected_git_cmd = (
@@ -348,7 +353,11 @@ class TestCmdUpdateBranchFallback:
             update_cmd, "_add_upstream_remote"
         ) as add_remote, patch.object(
             update_cmd, "_mark_skip_upstream_prompt"
-        ) as mark_skip, patch("builtins.input") as stdin_input:
+        ) as mark_skip, patch.object(
+            update_cmd, "_update_node_dependencies", return_value=[]
+        ), patch.object(
+            update_cmd, "_rebuild_desktop_after_update", return_value=True
+        ), patch("builtins.input") as stdin_input:
             cmd_update(SimpleNamespace(yes=True))
 
         stdin_input.assert_not_called()
