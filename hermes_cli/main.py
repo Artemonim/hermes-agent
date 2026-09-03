@@ -5192,6 +5192,7 @@ _LAZY_COMMAND_EXPORTS = {
         "_relaunch_stopped_serves",
         "_serve_relaunch_commands",
         "_log_only_write",
+        "_update_progress_heartbeat",
         "_mark_skip_upstream_prompt",
         "_npm_bin_exists",
         "_npm_lockfile_changed",
@@ -6722,7 +6723,15 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
             env=build_env,
         )
 
-    r1 = _install_web_deps(silent=True)
+    # Silent npm ci can sit with no stdout for ~10 minutes (it deletes
+    # node_modules first). Heartbeat so a Desktop `--gateway` update is
+    # not killed at the 600s idle ceiling while this step is healthy.
+    from hermes_cli.update_cmd import _update_progress_heartbeat
+
+    with _update_progress_heartbeat(
+        "  … still installing web UI dependencies ({elapsed}s elapsed)"
+    ):
+        r1 = _install_web_deps(silent=True)
     if r1.returncode != 0:
         _say(
             f"  {'✗' if fatal else '⚠'} Web UI npm install failed"
