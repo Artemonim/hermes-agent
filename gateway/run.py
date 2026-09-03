@@ -27226,7 +27226,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         self,
         poll_interval: float = 2.0,
         stream_interval: float = 4.0,
-        timeout: float = 1800.0,
+        timeout: float = 3600.0,
     ) -> None:
         """Watch ``hermes update --gateway``, streaming output + forwarding prompts.
 
@@ -27235,6 +27235,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         update process when it needs user input) and forwards the prompt to
         the messenger.  The user's next message is intercepted by
         ``_handle_message`` and written to ``.update_response``.
+
+        Default timeout matches the Windows spawn helper's
+        ``proc.wait(timeout=3600)`` in ``gateway/slash_commands.py``. A
+        full update (npm ci of ui-tui/web, often a second silent npm ci
+        inside the web build, Python deps, Electron rebuild) routinely
+        exceeds 30 minutes; the previous 1800s ceiling wrote exit 124
+        while the updater was still running.
         """
         pending_path = _hermes_home / ".update_pending.json"
         claimed_path = _hermes_home / ".update_pending.claimed.json"
@@ -27463,7 +27470,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             try:
                 await adapter.send(
                     chat_id,
-                    "❌ Hermes update timed out after 30 minutes.",
+                    "❌ Hermes update timed out after 60 minutes.",
                     metadata=_non_conversational_metadata(metadata, platform=platform),
                 )
             except Exception:

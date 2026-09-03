@@ -5194,6 +5194,7 @@ _LAZY_COMMAND_EXPORTS = {
         "_relaunch_stopped_serves",
         "_serve_relaunch_commands",
         "_log_only_write",
+        "_update_progress_heartbeat",
         "_mark_skip_upstream_prompt",
         "_npm_bin_exists",
         "_npm_lockfile_changed",
@@ -6724,7 +6725,15 @@ def _do_build_web_ui(web_dir: Path, *, fatal: bool = False) -> bool:
             env=build_env,
         )
 
-    r1 = _install_web_deps(silent=True)
+    # Silent npm ci can sit with no stdout for ~10 minutes (it deletes
+    # node_modules first). Heartbeat so a Desktop `--gateway` update is
+    # not killed at the 600s idle ceiling while this step is healthy.
+    from hermes_cli.update_cmd import _update_progress_heartbeat
+
+    with _update_progress_heartbeat(
+        "  … still installing web UI dependencies ({elapsed}s elapsed)"
+    ):
+        r1 = _install_web_deps(silent=True)
     if r1.returncode != 0:
         _say(
             f"  {'✗' if fatal else '⚠'} Web UI npm install failed"
@@ -10921,7 +10930,9 @@ def _install_hangup_protection(gateway_mode: bool = False):
     signals the user or OS sent on purpose.
 
     In gateway mode (``hermes update --gateway``) the update is already
-    spawned detached from a terminal, so this function is a no-op.
+    spawned detached from a terminal, so SIGHUP protection is unnecessary.
+    Output is still mirrored to ``update.log`` because the Windows Desktop
+    hand-off watchdog uses growth of that file as its progress signal.
 
     Returns a dict that ``cmd_update`` can pass to
     ``_finalize_update_output`` on exit.  Returning a dict rather than a
@@ -10934,19 +10945,17 @@ def _install_hangup_protection(gateway_mode: bool = False):
         "installed": False,
     }
 
-    if gateway_mode:
-        return state
+    if not gateway_mode:
+        import signal as _signal
 
-    import signal as _signal
-
-    # (1) Ignore SIGHUP for the remainder of this process.
-    if hasattr(_signal, "SIGHUP"):
-        try:
-            _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
-        except (ValueError, OSError):
-            # Called from a non-main thread — not fatal.  The update still
-            # runs, just without hangup protection.
-            pass
+        # (1) Ignore SIGHUP for the remainder of this process.
+        if hasattr(_signal, "SIGHUP"):
+            try:
+                _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
+            except (ValueError, OSError):
+                # Called from a non-main thread — not fatal.  The update still
+                # runs, just without hangup protection.
+                pass
 
     # (2) Mirror output to update.log and wrap stdio for broken-pipe
     # tolerance.  Any failure here is non-fatal; we just skip the wrap.
@@ -11097,9 +11106,8 @@ def cmd_update(args):
 
     gateway_mode = getattr(args, "gateway", False)
 
-    # Protect against mid-update terminal disconnects (SIGHUP) and tolerate
-    # writes to a closed stdout.  No-op in gateway mode.  See
-    # _install_hangup_protection for rationale.
+    # Protect terminal updates against SIGHUP and mirror both terminal and
+    # gateway update output to update.log. See _install_hangup_protection.
     _update_io_state = _install_hangup_protection(gateway_mode=gateway_mode)
     # Cross-process mutual exclusion. The dashboard's Update button spawns
     # this same command detached, and the desktop hands off to the Tauri

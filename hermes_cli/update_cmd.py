@@ -31,7 +31,9 @@ import shlex
 import shutil
 import subprocess
 import sys
+import threading
 import time as _time
+from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -4829,13 +4831,21 @@ def _update_node_dependencies() -> list[str]:
     # long download look hung. The chatty npm-deprecation noise during
     # `hermes update` comes from the *desktop* build, not this step; that
     # one is captured to update.log.
-    result = _m()._run_npm_install_deterministic(
-        npm,
-        _m().PROJECT_ROOT,
-        extra_args=tuple(install_args),
-        capture_output=False,
-        env=nixos_env,
-    )
+    #
+    # `--progress=false` still leaves npm silent for 8–10 minutes on a
+    # cold workspace install. Heartbeat so the Desktop idle watchdog (600s
+    # of no stdout AND no update.log growth → exit 124) does not kill a
+    # healthy update.
+    with _update_progress_heartbeat(
+        "  … still installing Node.js dependencies ({elapsed}s elapsed)"
+    ):
+        result = _m()._run_npm_install_deterministic(
+            npm,
+            _m().PROJECT_ROOT,
+            extra_args=tuple(install_args),
+            capture_output=False,
+            env=nixos_env,
+        )
     if result.returncode == 0:
         _record_npm_lockfile_hash(shared_hermes_root)
         print("  ✓ ui-tui, web workspaces installed (desktop skipped)")
@@ -4858,38 +4868,104 @@ def _log_only_write(text: str) -> None:
     installer's "Next steps" wall) should be captured and tucked into the log
     so failures stay debuggable, without flooding the user's terminal. This
     reaches past the mirroring stream straight to the underlying log handle.
+
+    When the wrapper is absent (a wrap-setup failure, or a caller outside
+    ``cmd_update``), fall through to the same log path. Windows Desktop's
+    idle watchdog watches that file; a silent no-op here is how a live
+    Electron rebuild used to be killed at 600s with exit 124.
     """
     if not text:
         return
+    payload = text if text.endswith("\n") else text + "\n"
     stream = _m().sys.stdout
     log_file = getattr(stream, "_log", None)
-    if log_file is None:
-        return
+    if log_file is not None:
+        try:
+            log_file.write(payload)
+            log_file.flush()
+            return
+        except Exception:
+            pass
     try:
-        log_file.write(text if text.endswith("\n") else text + "\n")
-        log_file.flush()
+        logs_dir = get_hermes_home() / "logs"
+        logs_dir.mkdir(parents=True, exist_ok=True)
+        with (logs_dir / "update.log").open("a", encoding="utf-8") as fh:
+            fh.write(payload)
     except Exception:
         pass
+
+
+@contextmanager
+def _update_progress_heartbeat(message: str, *, interval_seconds: int = 30):
+    """Print a flushed elapsed-time line so idle watchdogs see progress.
+
+    Windows Desktop's hand-off kills ``hermes update`` after 600s of
+    silence on both stdout and ``logs/update.log``. ``npm --progress=false``
+    and captured Electron builds are routinely quiet that long. *message*
+    must contain ``{elapsed}``.
+    """
+    done = threading.Event()
+    start = _time.time()
+
+    def _beat() -> None:
+        while not done.wait(interval_seconds):
+            elapsed = int(_time.time() - start)
+            print(message.format(elapsed=elapsed), flush=True)
+
+    t = threading.Thread(target=_beat, daemon=True, name="update-heartbeat")
+    t.start()
+    try:
+        yield
+    finally:
+        done.set()
+        t.join(timeout=0.2)
+
 
 def _run_logged_subprocess(cmd, *, cwd=None, env=None):
     """Run ``cmd`` capturing combined output into update.log (not the terminal).
 
+    Output is streamed to the log as it arrives so the Windows Desktop
+    hand-off idle watchdog (600s, watches ``logs/update.log`` growth) can
+    see a 40-minute Electron/vite build as progress. Buffering until
+    ``subprocess.run`` returned made every rebuild look stalled.
+
     Returns the ``CompletedProcess`` (with ``stdout`` populated) so the caller
     can decide whether to surface the captured output on failure.
     """
-    result = subprocess.run(
-        cmd,
-        cwd=cwd,
-        env=env,
-        check=False,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    _log_only_write(result.stdout or "")
-    return result
+    chunks: list[str] = []
+    child_env = dict(env) if env is not None else os.environ.copy()
+    # Python children block-buffer stdout when it is a pipe; without this
+    # the line loop below still sees nothing until the child exits.
+    child_env.setdefault("PYTHONUNBUFFERED", "1")
+    try:
+        proc = subprocess.Popen(
+            cmd,
+            cwd=cwd,
+            env=child_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            bufsize=1,
+        )
+    except OSError as exc:
+        return subprocess.CompletedProcess(cmd, 127, stdout="", stderr=str(exc))
+
+    try:
+        if proc.stdout is not None:
+            for line in proc.stdout:
+                chunks.append(line)
+                _log_only_write(line)
+        returncode = proc.wait()
+    except Exception:
+        proc.kill()
+        try:
+            proc.wait(timeout=5)
+        except Exception:
+            pass
+        raise
+    return subprocess.CompletedProcess(cmd, returncode, stdout="".join(chunks), stderr=None)
 
 def _classify_fetch_failure(stderr: str) -> str:
     """Map git-fetch stderr to a one-line, user-facing diagnosis.
@@ -8327,13 +8403,17 @@ def _rebuild_desktop_after_update(
     from hermes_constants import with_hermes_node_path
 
     build_env = with_hermes_node_path()
-    build_result = _m()._run_logged_subprocess(
-        desktop_build_cmd, cwd=_m().PROJECT_ROOT, env=build_env
-    )
-    if build_result.returncode != 0:
+    with _update_progress_heartbeat(
+        "  … still building desktop app ({elapsed}s elapsed) — "
+        "Electron/vite can take several minutes"
+    ):
         build_result = _m()._run_logged_subprocess(
             desktop_build_cmd, cwd=_m().PROJECT_ROOT, env=build_env
         )
+        if build_result.returncode != 0:
+            build_result = _m()._run_logged_subprocess(
+                desktop_build_cmd, cwd=_m().PROJECT_ROOT, env=build_env
+            )
     if build_result.returncode != 0:
         print("  ⚠ Desktop build failed (run `hermes desktop` to retry)")
         tail = "\n".join((build_result.stdout or "").strip().splitlines()[-15:])
