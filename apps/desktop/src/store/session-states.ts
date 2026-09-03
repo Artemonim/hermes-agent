@@ -1439,7 +1439,6 @@ export function openSessionTile(
 
   const workspaceOwnerKey = workspaceScope.workspaceMode === 'bots' ? workspaceScope.workspaceOwnerKey : undefined
 
-  const aliases = lineageAliases(storedSessionId, $sessions.get())
   if (!tiles.some(t => aliases.includes(t.storedSessionId))) {
     saveTiles([
       ...tiles,
