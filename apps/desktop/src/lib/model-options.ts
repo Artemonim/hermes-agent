@@ -188,17 +188,16 @@ export async function requestModelOptions({
       try {
         const restOptions = await restModelOptions(explicitOnly, refresh, profile)
 
-        if (hasSelectableModels(restOptions)) {
-          return {
-            ...restOptions,
-            ...(gatewayOptions?.provider ? { provider: gatewayOptions.provider } : {}),
-            ...(gatewayOptions?.model ? { model: gatewayOptions.model } : {})
-          }
+      if (hasSelectableModels(restOptions)) {
+        return {
+          ...restOptions,
+          ...(gatewayOptions?.provider ? { provider: gatewayOptions.provider } : {}),
+          ...(gatewayOptions?.model ? { model: gatewayOptions.model } : {})
         }
-      } catch {
-        // Preserve the gateway result (or its original error) when the recovery
-        // path is unavailable.
       }
+    } catch {
+      // Preserve the gateway result (or its original error) when the recovery
+      // path is unavailable.
     }
 
     if (gatewayOptions) {

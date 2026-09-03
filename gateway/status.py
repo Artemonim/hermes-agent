@@ -157,6 +157,23 @@ def _same_hermes_home(left: Path | str, right: Path | str) -> bool:
     )
 
 
+def _pid_record_belongs_to_current_profile(
+    record: Optional[dict[str, Any]],
+) -> bool:
+    """Return True when the PID record's ``hermes_home`` matches this process.
+
+    Restored after a main→dev merge dropped the helper while leaving the
+    call sites in ``get_running_pid`` / ``get_runtime_status_running_pid``
+    (#74872). Without it, ``hermes gateway restart`` raises NameError.
+    """
+    if not isinstance(record, dict):
+        return False
+    record_home = record.get("hermes_home")
+    if not record_home:
+        return True
+    return _same_hermes_home(record_home, _get_process_hermes_home())
+
+
 def recorded_gateway_home_conflicts(
     record: Optional[dict[str, Any]],
     *,

@@ -7089,7 +7089,7 @@ def _desktop_staging_dir(desktop_dir: Path) -> Path:
     """
     for stale in desktop_dir.glob(f"{_DESKTOP_STAGING_PREFIX}*"):
         shutil.rmtree(stale, ignore_errors=True)
-    return desktop_dir / f"{_DESKTOP_STAGING_PREFIX}{os.getpid()}-{int(_time_mod.time())}"
+    return desktop_dir / f"{_DESKTOP_STAGING_PREFIX}{os.getpid()}-{int(_time.time())}"
 
 
 def _desktop_unpacked_root(exe: Path, release_dir: Path) -> Path:

@@ -1401,10 +1401,10 @@ function projectTreeSessions(): SessionInfo[] {
     ])
 }
 
-// The best cached row for a stored id, across every list that can hold one.
-// "Best" means self-describing: the same conversation can appear both as an
-// ownerless legacy Recents copy and as a profile-stamped project-tree row, and
-// picking the ownerless one throws away the only routing information we have.
+/** The best cached row for a stored id, across every list that can hold one.
+ *  "Best" means self-describing: the same conversation can appear both as an
+ *  ownerless legacy Recents copy and as a profile-stamped project-tree row, and
+ *  picking the ownerless one throws away the only routing information we have. */
 export function cachedSessionRow(storedSessionId: string): SessionInfo | undefined {
   const candidates = [
     ...$sessions.get(),
