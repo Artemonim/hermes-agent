@@ -62,7 +62,7 @@ import {
   shouldTrustHermesOverride,
   verifyHermesCli
 } from './backend-probes'
-import { waitForDashboardPortAnnouncement } from './backend-ready'
+import { armBackendReadyAnnouncement } from './backend-ready'
 import { recycleOwnedBackend } from './backend-recycle'
 import { isPidAliveWindows, waitForBackendRelease } from './backend-release-gate'
 import {
@@ -12327,15 +12327,12 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
   // consumed chunks to late listeners — a sentinel printed while
   // claimBackendChild runs would otherwise be lost forever, timing out a
   // healthy backend. The tail-buffer accessor covers any residual gap.
-  const portAnnouncement = waitForDashboardPortAnnouncement(child, {
+  const portAnnouncement = armBackendReadyAnnouncement(child, {
     bufferedOutput: () => outputTail.text(),
     describeOutputTail: () => outputTail.describe(),
     readyFile
   })
 
-  // Mark handled so an early rejection (child dies during the claim) can't
-  // surface as an unhandled rejection before the Promise.race below attaches.
-  portAnnouncement.catch(() => {})
   await claimBackendChild(child, `${backend.command} ${backend.args.join(' ')}`, profile, backendNonce, outputTail)
 
   child.stdout.on('data', rememberLog)
@@ -12738,15 +12735,12 @@ async function startHermes() {
     // window was lost forever — the wait then hit its 90s timeout and a
     // healthy backend was killed (deterministic on Windows, racy on
     // macOS/Linux). The tail-buffer accessor covers any residual gap.
-    const portAnnouncement = waitForDashboardPortAnnouncement(hermesProcess, {
+    const portAnnouncement = armBackendReadyAnnouncement(hermesProcess, {
       bufferedOutput: () => primaryOutputTail.text(),
       describeOutputTail: () => primaryOutputTail.describe(),
       readyFile
     })
 
-    // Mark handled so an early rejection (child dies during the claim) can't
-    // surface as an unhandled rejection before the Promise.race below attaches.
-    portAnnouncement.catch(() => {})
     await claimBackendChild(
       hermesProcess,
       `${backend.command} ${backend.args.join(' ')}`,

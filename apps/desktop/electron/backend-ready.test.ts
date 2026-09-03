@@ -22,6 +22,7 @@ import { test } from 'vitest'
 import {
   DEFAULT_PORT_ANNOUNCE_TIMEOUT_MS,
   MIN_PORT_ANNOUNCE_TIMEOUT_MS,
+  armBackendReadyAnnouncement,
   readDashboardReadyFile,
   resolvePortAnnounceTimeoutMs,
   waitForDashboardPort,
@@ -318,4 +319,37 @@ test('bufferedOutput without a sentinel still times out (no false positive)', as
   )
 
   await assert.rejects(wait, /Timed out waiting/)
+})
+
+// ---------------------------------------------------------------------------
+// Arm-then-claim (#09af remake): READY during claimBackendChild is consumed by
+// the first watcher. A second waitForDashboardPortAnnouncement after claim
+// never sees it — that was the Desktop hang (90s timeout).
+// ---------------------------------------------------------------------------
+
+test('armBackendReadyAnnouncement sees READY emitted during claimBackendChild', async () => {
+  const child = makeFakeChild()
+  const armed = armBackendReadyAnnouncement(child, { timeoutMs: 1000 })
+
+  async function claimBackendChild() {
+    child.stdout.emit('data', Buffer.from('HERMES_BACKEND_READY port=43215\n'))
+  }
+
+  await claimBackendChild()
+  assert.equal(await armed, 43215)
+})
+
+test('a second READY watcher after claim times out (the 09af hang)', async () => {
+  const child = makeFakeChild()
+  const armed = armBackendReadyAnnouncement(child, { timeoutMs: 1000 })
+
+  async function claimBackendChild() {
+    child.stdout.emit('data', Buffer.from('HERMES_BACKEND_READY port=43216\n'))
+  }
+
+  await claimBackendChild()
+  assert.equal(await armed, 43216)
+
+  const late = waitForDashboardPortAnnouncement(child, { timeoutMs: 50 })
+  await assert.rejects(late, /Timed out waiting/)
 })

@@ -237,9 +237,28 @@ function waitForDashboardPortAnnouncement(
   return waitForDashboardPort(child, timeoutMs, describeOutputTail, options.bufferedOutput ?? (() => ''))
 }
 
+function armBackendReadyAnnouncement(
+  child,
+  options: {
+    bufferedOutput?: () => string
+    describeOutputTail?: () => string
+    readyFile?: fs.PathOrFileDescriptor | null
+    timeoutMs?: number
+  } = {}
+) {
+  // Arm before claimBackendChild (or any other await that can drain stdout).
+  // Callers must race/await THIS promise afterward — a second
+  // waitForDashboardPortAnnouncement never sees a sentinel the first
+  // listener already consumed.
+  const ready = waitForDashboardPortAnnouncement(child, options)
+  ready.catch(() => {})
+  return ready
+}
+
 export {
   DEFAULT_PORT_ANNOUNCE_TIMEOUT_MS,
   MIN_PORT_ANNOUNCE_TIMEOUT_MS,
+  armBackendReadyAnnouncement,
   readDashboardReadyFile,
   resolvePortAnnounceTimeoutMs,
   waitForDashboardPort,
