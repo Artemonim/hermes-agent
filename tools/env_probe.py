@@ -198,6 +198,17 @@ def _pip_python_version() -> Optional[str]:
     return None
 
 
+def _resolve_terminal_backend() -> str:
+    """Scope-aware terminal backend name (``local`` when unresolvable)."""
+    try:
+        from tools.terminal_scope import terminal_env
+
+        return (terminal_env("TERMINAL_ENV") or "local").strip().lower()
+    except Exception:  # never let policy resolution break prompt building
+        logger.debug("terminal backend resolution failed", exc_info=True)
+        return "local"
+
+
 def _build_probe_line() -> str:
     """Build the one-liner.  Returns "" when nothing notable is detected.
 
@@ -304,6 +315,15 @@ def get_environment_probe_line(*, force_refresh: bool = False) -> str:
             _PROBE_THREAD = None
             _PROBE_GEN += 1
             _WAIT_ALREADY_TIMED_OUT = False
+
+    # Resolve the backend HERE, in the caller's context: under gateway
+    # multiplexing the routed profile's backend lives in the per-turn terminal
+    # scope, which the bare probe worker thread does not inherit (#68559). A
+    # remote backend answers "" without consulting the cache — the cached line
+    # describes the HOST toolchain, not where that profile's tools run.
+    backend = _resolve_terminal_backend()
+    if backend in _REMOTE_BACKENDS or _plugin_backend_is_remote(backend):
+        return ""
 
     if _PROBE_DONE.is_set():
         return _CACHED_LINE or ""

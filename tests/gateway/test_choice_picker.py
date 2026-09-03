@@ -126,7 +126,7 @@ class TestFastChoicePicker:
 
         assert result is None
         values = [c["value"] for c in adapter.calls[0]["choices"]]
-        assert values == ["fast", "normal"]
+        assert values == ["fast", "normal", "auto", "cold"]
 
     @pytest.mark.asyncio
     async def test_fast_picker_title_shows_flex(self, tmp_path, monkeypatch):

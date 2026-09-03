@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import platform
+import re
 import secrets
 import stat
 import subprocess
@@ -26,6 +27,92 @@ from typing import Any, Dict, List, Optional, Tuple
 from utils import base_url_host_matches, base_url_hostname, normalize_proxy_env_vars
 from agent.secret_scope import get_secret as _get_secret
 
+# This module keeps client construction and the Messages API call itself.  The
+# three surfaces it used to inline now live next to it:
+#
+#   agent/anthropic_endpoints.py        base-URL/endpoint-family predicates
+#   agent/anthropic_message_convert.py  OpenAI -> Anthropic payload conversion
+#   agent/anthropic_credentials.py      credential sources, OAuth, refresh commit
+#
+# All three are re-exported below so long standing
+# ``from agent.anthropic_adapter import resolve_anthropic_token`` (or
+# ``convert_messages_to_anthropic``, ...) imports keep resolving.
+from agent.anthropic_endpoints import (  # noqa: F401
+    _KIMI_FAMILY_EXACT_SLUGS,
+    _KIMI_FAMILY_MODEL_PREFIXES,
+    _base_url_needs_context_1m_beta,
+    _is_azure_anthropic_endpoint,
+    _is_deepseek_anthropic_endpoint,
+    _is_kimi_coding_endpoint,
+    _is_kimi_family_endpoint,
+    _is_minimax_anthropic_endpoint,
+    _is_nous_portal_endpoint,
+    _is_opencode_endpoint,
+    _is_third_party_anthropic_endpoint,
+    _model_name_is_kimi_family,
+    _normalize_base_url_text,
+    _requires_bearer_auth,
+)
+from agent.anthropic_message_convert import (  # noqa: F401
+    _EMPTY_TEXT_PLACEHOLDER,
+    _apply_assistant_cache_control_to_last_cacheable_block,
+    _content_parts_to_anthropic_blocks,
+    _convert_assistant_message,
+    _convert_content_part_to_anthropic,
+    _convert_content_to_anthropic,
+    _convert_tool_message_to_result,
+    _convert_user_message,
+    _ensure_leading_user_turn,
+    _evict_old_screenshots,
+    _extract_preserved_thinking_blocks,
+    _fix_blank_text_blocks_in_list,
+    _image_source_from_openai_url,
+    _is_bedrock_model_id,
+    _manage_thinking_signatures,
+    _merge_consecutive_roles,
+    _normalize_tool_input_schema,
+    _safe_text,
+    _sanitize_replay_block,
+    _sanitize_tool_id,
+    _scrub_blank_text_blocks,
+    _strip_orphaned_tool_blocks,
+    _to_plain_data,
+    convert_messages_to_anthropic,
+    convert_tools_to_anthropic,
+    normalize_model_name,
+)
+from agent.anthropic_credentials import (  # noqa: F401
+    _OAUTH_CLIENT_ID,
+    _OAUTH_REDIRECT_URI,
+    _OAUTH_SCOPES,
+    _OAUTH_TOKEN_URL,
+    _OAUTH_TOKEN_URLS,
+    _OAUTH_TOKEN_USER_AGENT,
+    CredentialPersistError,
+    _generate_pkce,
+    _get_hermes_oauth_file,
+    _getenv,
+    _is_oauth_token,
+    _prefer_refreshable_claude_code_token,
+    _read_claude_code_credentials_from_file,
+    _read_claude_code_credentials_from_keychain,
+    _refresh_oauth_token,
+    _resolve_anthropic_pool_token,
+    _resolve_claude_code_token_from_credentials,
+    _write_claude_code_credentials,
+    _write_hermes_oauth_credentials,
+    claude_code_credentials_path,
+    is_claude_code_token_valid,
+    is_rotation_consumed_uncommitted,
+    mark_rotation_consumed_uncommitted,
+    read_claude_code_credentials,
+    read_hermes_oauth_credentials,
+    refresh_anthropic_oauth_pure,
+    resolve_anthropic_token,
+    run_hermes_oauth_login_pure,
+    run_oauth_setup_token,
+)
+
 try:
     import hermes_cli as _hermes_cli
 
@@ -34,15 +121,6 @@ except Exception:
     _HERMES_VERSION = "0.0.0"
 
 
-def _getenv(name: str, default: str = "") -> str:
-    """Profile-scoped replacement for os.getenv on credential reads.
-
-    Routes through the secret scope (Workstream A): identical to os.getenv
-    when multiplexing is off, scope-aware (and fail-closed on an unscoped
-    read) when on. Mirrors the same wrapper in hermes_cli/runtime_provider.py.
-    """
-    val = _get_secret(name, default)
-    return val if val is not None else default
 
 # NOTE: `import anthropic` is deliberately NOT at module top — the SDK pulls
 # ~220 ms of imports (anthropic.types, anthropic.lib.tools._beta_runner, etc.)
@@ -148,7 +226,7 @@ def _is_claude_model(model: str | None) -> bool:
     return "claude" in (model or "").lower()
 
 
-_FAST_MODE_SUPPORTED_SUBSTRINGS = ("opus-4-6", "opus-4.6")
+_FAST_MODE_SUPPORTED_SUBSTRINGS = ("opus-4-8", "opus-4.8", "opus-5")
 
 # ── Max output token limits per Anthropic model ───────────────────────
 # Source: Anthropic docs + Cline model catalog.  Anthropic's API requires
@@ -355,13 +433,28 @@ def _forbids_sampling_params(model: str) -> bool:
 
 
 def _supports_fast_mode(model: str) -> bool:
-    """Return True for models that support Anthropic Fast Mode (speed=fast).
+    """Return True for models that accept the ``speed: "fast"`` request param.
 
-    Per Anthropic docs, fast mode is currently supported on Opus 4.6 only.
-    Sending ``speed: "fast"`` to any other Claude model (including Opus 4.7)
-    returns HTTP 400. This guard prevents silently 400'ing when stale config
-    or older callers leave fast mode enabled across a model upgrade.
+    Per the Anthropic fast-mode docs (research preview), the ``speed`` param
+    is supported on Opus 4.8 and Opus 5 — Claude API only. The matrix has
+    changed with nearly every Opus release, in both directions:
+
+    - Opus 4.6 HAD fast mode at launch and LOST it (2026-06-29): requests
+      with ``speed: "fast"`` do not error — they silently run at standard
+      speed and bill standard rates (``usage.speed: "standard"``). Keeping
+      4.6 in this allowlist would show users a fast toggle that does
+      nothing.
+    - Opus 4.7 never had it and hard-400s on the parameter.
+    - Dedicated ``…-fast`` model ids (e.g. OpenRouter's
+      ``claude-opus-4.8-fast``) select fast inference via the model field
+      itself and must NOT also receive the speed parameter.
+
+    Keep this an explicit allowlist rather than a version-floor check so a
+    model that drops fast mode again fails closed (standard speed) instead
+    of silently 400'ing.
     """
+    if "-fast" in model:
+        return False
     return any(v in model for v in _FAST_MODE_SUPPORTED_SUBSTRINGS)
 
 
@@ -439,6 +532,55 @@ def _detect_claude_code_version() -> str:
 _CLAUDE_CODE_SYSTEM_PREFIX = "You are Claude Code, Anthropic's official CLI for Claude."
 _MCP_TOOL_PREFIX = "mcp__"
 
+# Anthropic's OAuth billing classifier fingerprints certain Hermes tool
+# schemas/prose as a third-party app and reroutes the request to the metered
+# extra-usage lane, surfacing as HTTP 400 "You're out of extra usage" on a
+# valid subscription token (#65365). Deterministic live A/B repros (issue
+# #65365 comments, replayed with the anthropic-ratelimit-unified-* response
+# headers as a lane oracle) isolated two independent triggers:
+#   - the ``session_search`` tool schema/name/prose, alone
+#   - the ``memory`` tool schema/name, alone
+# Both are aliased to neutral names on the OAuth wire only. normalize_response
+# reverses the mapping before dispatch, so tool behavior and API-key requests
+# are unchanged.
+_OAUTH_TOOL_NAME_ALIASES = {
+    "session_search": "chat_history_lookup",
+    "memory": "context_notes",
+}
+_OAUTH_TOOL_NAME_REVERSE_ALIASES = {
+    wire_name: name for name, wire_name in _OAUTH_TOOL_NAME_ALIASES.items()
+}
+
+# Aliases that are ALSO safe to substitute in free-form prose (system prompt
+# text, tool descriptions). Only unambiguous snake_case tool tokens qualify:
+# "memory" is ordinary English throughout the system prompt ("persistent
+# memory across sessions", "OS, CPU, memory, disk") and inside the memory
+# tool's own parameter docs (the ``target`` enum the model must still emit
+# verbatim), so rewriting it in prose would corrupt guidance the model has
+# to follow. Renaming a tool is a different operation from rewriting the
+# vocabulary that describes it — a model that follows unaliased "memory"
+# prose and calls ``memory`` still dispatches correctly: normalize_response
+# resolves the bare name through the tool registry regardless.
+_OAUTH_PROSE_ALIAS_NAMES = frozenset({"session_search"})
+
+# Word-boundary matchers so a prose substitution can't corrupt a longer
+# identifier that merely contains the token (project AGENTS.md / memory
+# snapshots can carry arbitrary text, e.g. a path like
+# ``tools/session_search_tool.py`` must not become
+# ``tools/chat_history_lookup_tool.py``). ``\b`` treats ``_`` as a word
+# char, so only the standalone token matches.
+_OAUTH_PROSE_ALIAS_PATTERNS = tuple(
+    (re.compile(rf"\b{re.escape(name)}\b"), _OAUTH_TOOL_NAME_ALIASES[name])
+    for name in sorted(_OAUTH_PROSE_ALIAS_NAMES)
+)
+
+
+def _apply_oauth_prose_aliases(text: str) -> str:
+    """Rewrite prose-safe tool-name tokens to their OAuth wire aliases."""
+    for pattern, wire_name in _OAUTH_PROSE_ALIAS_PATTERNS:
+        text = pattern.sub(wire_name, text)
+    return text
+
 
 def _get_claude_code_version() -> str:
     """Lazily detect the installed Claude Code version when OAuth headers need it."""
@@ -448,271 +590,7 @@ def _get_claude_code_version() -> str:
     return _claude_code_version_cache
 
 
-def _is_oauth_token(key: str) -> bool:
-    """Check if the key is an Anthropic OAuth/setup token.
 
-    Positively identifies Anthropic OAuth tokens by their key format:
-    - ``sk-ant-`` prefix (but NOT ``sk-ant-api``) → setup tokens, managed keys
-    - ``eyJ`` prefix → JWTs from the Anthropic OAuth flow
-    - ``cc-`` prefix → Claude Code OAuth access tokens (from CLAUDE_CODE_OAUTH_TOKEN)
-
-    Non-Anthropic keys (MiniMax, Alibaba, etc.) don't match any pattern
-    and correctly return False.
-    """
-    if not key:
-        return False
-    # Regular Anthropic Console API keys — x-api-key auth, never OAuth
-    if key.startswith("sk-ant-api"):
-        return False
-    # Anthropic-issued tokens (setup-tokens sk-ant-oat-*, managed keys)
-    if key.startswith("sk-ant-"):
-        return True
-    # JWTs from Anthropic OAuth flow
-    if key.startswith("eyJ"):
-        return True
-    # Claude Code OAuth access tokens (opaque, from CLAUDE_CODE_OAUTH_TOKEN)
-    if key.startswith("cc-"):
-        return True
-    return False
-
-
-def _normalize_base_url_text(base_url) -> str:
-    """Normalize SDK/base transport URL values to a plain string for inspection.
-
-    Some client objects expose ``base_url`` as an ``httpx.URL`` instead of a raw
-    string.  Provider/auth detection should accept either shape.
-    """
-    if not base_url:
-        return ""
-    return str(base_url).strip()
-
-
-def _is_third_party_anthropic_endpoint(base_url: str | None) -> bool:
-    """Return True for non-Anthropic endpoints using the Anthropic Messages API.
-
-    Third-party proxies (Microsoft Foundry, AWS Bedrock, self-hosted) authenticate
-    with their own API keys via x-api-key, not Anthropic OAuth tokens. OAuth
-    detection should be skipped for these endpoints.
-    """
-    normalized = _normalize_base_url_text(base_url)
-    if not normalized:
-        return False  # No base_url = direct Anthropic API
-    normalized = normalized.rstrip("/").lower()
-    if "anthropic.com" in normalized:
-        return False  # Direct Anthropic API — OAuth applies
-    return True  # Any other endpoint is a third-party proxy
-
-
-def _is_kimi_coding_endpoint(base_url: str | None) -> bool:
-    """Return True for Kimi's /coding endpoint that requires claude-code UA."""
-    normalized = _normalize_base_url_text(base_url)
-    if not normalized:
-        return False
-    return normalized.rstrip("/").lower().startswith("https://api.kimi.com/coding")
-
-
-def _is_opencode_endpoint(base_url: str | None) -> bool:
-    """Return True for OpenCode's Zen/Go relay (opencode.ai)."""
-    return base_url_host_matches(base_url or "", "opencode.ai")
-
-
-# Model-name prefixes that identify the Kimi / Moonshot family.  Covers
-# - official slugs: ``kimi-k2.5``, ``kimi_thinking``, ``moonshot-v1-8k``
-# - common release lines: ``k1.5-...``, ``k2-thinking``, ``k25-...``, ``k2.5-...``,
-#   and the bare Coding Plan slug ``k3`` (plus ``k3.x``/``k3-...`` variants)
-# Matched case-insensitively against the post-``normalize_model_name`` form,
-# so a caller's ``provider/vendor/model`` slug is handled the same as a
-# bare name.
-_KIMI_FAMILY_MODEL_PREFIXES = (
-    "kimi-", "kimi_",
-    "moonshot-", "moonshot_",
-    "k1.", "k1-",
-    "k2.", "k2-",
-    "k25", "k2.5",
-    "k3.", "k3-",
-)
-
-# Bare release slugs with no separator suffix (Kimi Coding Plan serves K3
-# as the exact slug ``k3``). Kept exact-match so unrelated model names that
-# merely start with the same characters don't get misclassified.
-_KIMI_FAMILY_EXACT_SLUGS = frozenset({"k3"})
-
-
-def _model_name_is_kimi_family(model: str | None) -> bool:
-    if not isinstance(model, str):
-        return False
-    m = model.strip().lower()
-    if not m:
-        return False
-    # Strip vendor prefix (e.g. ``moonshotai/kimi-k2.5`` → ``kimi-k2.5``)
-    if "/" in m:
-        m = m.rsplit("/", 1)[-1]
-    if m in _KIMI_FAMILY_EXACT_SLUGS:
-        return True
-    return m.startswith(_KIMI_FAMILY_MODEL_PREFIXES)
-
-
-def _is_kimi_family_endpoint(base_url: str | None, model: str | None = None) -> bool:
-    """Return True for any Kimi / Moonshot Anthropic-Messages-speaking endpoint.
-
-    Broader than ``_is_kimi_coding_endpoint`` — matches:
-
-    - Kimi's official ``/coding`` URL (legacy check, preserved)
-    - Any ``api.kimi.com`` / ``moonshot.ai`` / ``moonshot.cn`` host
-    - Custom or proxied endpoints whose *model* name is in the Kimi / Moonshot
-      family (``kimi-*``, ``moonshot-*``, ``k1.*``, ``k2.*``, …).  Users with
-      ``api_mode: anthropic_messages`` on a private gateway fronting Kimi
-      fall into this branch — the upstream still enforces Kimi's thinking
-      semantics (reasoning_content required on every replayed tool-call
-      message) regardless of the gateway's hostname.
-
-    Used to decide whether to drop Anthropic's ``thinking`` kwarg and to
-    preserve unsigned reasoning_content-derived thinking blocks on replay.
-    See hermes-agent#13848, #17057.
-    """
-    if _is_kimi_coding_endpoint(base_url):
-        return True
-    for _domain in ("api.kimi.com", "moonshot.ai", "moonshot.cn"):
-        if base_url_host_matches(base_url or "", _domain):
-            return True
-    if _model_name_is_kimi_family(model):
-        return True
-    return False
-
-
-def _is_deepseek_anthropic_endpoint(base_url: str | None) -> bool:
-    """Return True for DeepSeek's Anthropic-compatible endpoint.
-
-    DeepSeek's ``/anthropic`` route speaks the Anthropic Messages protocol
-    but, when thinking mode is enabled, requires the ``thinking`` blocks
-    from prior assistant turns to round-trip on subsequent requests — the
-    generic third-party path strips them and triggers HTTP 400::
-
-        The content[].thinking in the thinking mode must be passed back
-        to the API.
-
-    Per DeepSeek's published compatibility matrix the blocks are unsigned
-    (no Anthropic-proprietary signature, no ``redacted_thinking`` support),
-    so this endpoint is handled with the same strip-signed / keep-unsigned
-    policy used for Kimi's ``/coding`` endpoint.  The match is pinned to
-    the ``/anthropic`` path so the OpenAI-compatible ``api.deepseek.com``
-    base URL (which never reaches this adapter) is not misclassified.
-    See hermes-agent#16748.
-    """
-    if not base_url_host_matches(base_url or "", "api.deepseek.com"):
-        return False
-    normalized = _normalize_base_url_text(base_url)
-    if not normalized:
-        return False
-    return "/anthropic" in normalized.rstrip("/").lower()
-
-
-def _is_nous_portal_endpoint(base_url: str | None) -> bool:
-    """Return True for Nous Portal's Anthropic Messages route.
-
-    Portal serves its ``anthropic/*`` catalog natively at
-    ``https://inference-api.nousresearch.com/v1/messages``.  Portal-specific
-    behaviours key off this: Bearer JWT auth, verbatim catalog model ids,
-    and native thinking-signature replay.
-
-    Trusted hosts only:
-
-    1. Prod hostname ``inference-api.nousresearch.com``
-    2. The operator-set ``NOUS_INFERENCE_BASE_URL`` hostname (staging/preview)
-
-    Lookalikes such as ``inference-api.nousresearch.com.attacker.test`` are
-    rejected (hostname match, not substring).
-    """
-    if base_url_host_matches(base_url or "", "inference-api.nousresearch.com"):
-        return True
-    try:
-        from hermes_cli.auth import _nous_inference_env_override
-
-        override = _nous_inference_env_override()
-    except Exception:
-        return False
-    if not override:
-        return False
-    # Exact host equality (not subdomain) so the env override can't broaden
-    # into sibling hosts the operator did not set.
-    override_host = base_url_hostname(override)
-    return bool(override_host) and base_url_hostname(base_url or "") == override_host
-
-
-def _requires_bearer_auth(base_url: str | None) -> bool:
-    """Return True for Anthropic-compatible providers that require Bearer auth.
-
-    Some third-party /anthropic endpoints implement Anthropic's Messages API but
-    require Authorization: Bearer instead of Anthropic's native x-api-key header.
-    MiniMax's global and China Anthropic-compatible endpoints, Azure AI
-    Foundry's Anthropic-style endpoint, Palantir Foundry's LLM proxy, and Nous
-    Portal's Messages route follow this pattern.
-    """
-    if _is_nous_portal_endpoint(base_url):
-        return True
-    normalized = _normalize_base_url_text(base_url)
-    if not normalized:
-        return False
-    normalized = normalized.rstrip("/").lower()
-    return (
-        normalized.startswith(("https://api.minimax.io/anthropic", "https://api.minimaxi.com/anthropic"))
-        or "azure.com" in normalized
-        # Palantir Foundry LLM proxy (<org>.palantirfoundry.com/api/v2/llm/proxy/anthropic)
-        # rejects x-api-key with 401 and requires Authorization: Bearer.
-        # Hostname match (not substring) so e.g. evil.com/palantirfoundry
-        # paths don't trigger Bearer auth.
-        or base_url_host_matches(normalized, "palantirfoundry.com")
-        # CommandCode's /provider/v1/messages endpoint uses Bearer auth,
-        # not Anthropic's native x-api-key header. Hostname match for the
-        # same reason as above.
-        or base_url_host_matches(normalized, "api.commandcode.ai")
-    )
-
-
-def _base_url_needs_context_1m_beta(base_url: str | None) -> bool:
-    """Return True for endpoints that still gate 1M context behind a beta."""
-    normalized = _normalize_base_url_text(base_url).lower()
-    if not normalized:
-        return False
-    return "azure.com" in normalized
-
-
-def _is_minimax_anthropic_endpoint(base_url: str | None) -> bool:
-    """Return True for MiniMax's Anthropic-compatible endpoints.
-
-    MiniMax rejects the fine-grained-tool-streaming and context-1m betas;
-    those need to be stripped even though MiniMax also uses Bearer auth.
-    """
-    normalized = _normalize_base_url_text(base_url)
-    if not normalized:
-        return False
-    normalized = normalized.rstrip("/").lower()
-    return normalized.startswith(
-        ("https://api.minimax.io/anthropic", "https://api.minimaxi.com/anthropic")
-    )
-
-
-def _is_azure_anthropic_endpoint(base_url: str | None) -> bool:
-    """Return True for Azure-hosted Anthropic Messages endpoints.
-
-    Covers both the modern Foundry host family (``*.services.ai.azure.*``)
-    and the legacy Azure OpenAI host family (``*.openai.azure.*``) when
-    serving Anthropic's ``/anthropic`` route. Used to opt-in those hosts
-    to the ``api-version`` query-param plumbing required by Azure.
-
-    Intentionally avoids a finite allow-list of TLD suffixes so it works
-    across sovereign / private Azure clouds.
-    """
-    normalized = _normalize_base_url_text(base_url)
-    if not normalized:
-        return False
-    parsed = urlparse(normalized)
-    host = (parsed.hostname or "").lower().rstrip(".")
-    path = (parsed.path or "").lower()
-    host_padded = f".{host}."
-    is_foundry_host = ".services.ai.azure." in host_padded
-    is_legacy_azoai_host = ".openai.azure." in host_padded
-    return (is_foundry_host or is_legacy_azoai_host) and "/anthropic" in path
 
 
 def _common_betas_for_base_url(
@@ -2956,9 +2834,9 @@ def build_anthropic_kwargs(
     thinking block signatures are stripped (they are Anthropic-proprietary).
 
     When *fast_mode* is True, adds ``extra_body["speed"] = "fast"`` and the
-    fast-mode beta header for ~2.5x faster output throughput on Opus 4.6.
-    Currently only supported on native Anthropic endpoints (not third-party
-    compatible ones).
+    fast-mode beta header for ~2.5x faster output throughput on Opus 4.8 /
+    Opus 5. Currently only supported on native Anthropic endpoints (not
+    third-party compatible ones).
     """
     system, anthropic_messages = convert_messages_to_anthropic(
         messages, base_url=base_url, model=model
@@ -3007,6 +2885,7 @@ def build_anthropic_kwargs(
                 text = text.replace("Hermes agent", "Claude Code")
                 text = text.replace("hermes-agent", "claude-code")
                 text = text.replace("Nous Research", "Anthropic")
+                text = _apply_oauth_prose_aliases(text)
                 block["text"] = text
 
         # 3. Normalize tool names so NOTHING goes on the OAuth wire with a
@@ -3027,7 +2906,14 @@ def build_anthropic_kwargs(
         #    so any session with an MCP server configured still tripped the
         #    classifier. normalize_response reverses both forms via registry
         #    lookup so the dispatcher still sees the original name. GH-25255.
-        def _to_oauth_wire_name(name: str) -> str:
+        # Wire names owned by tools that are NOT alias sources. An alias must
+        # never collide with one: two identical tool names in a single
+        # request is a hard 400 from Anthropic, strictly worse than the bug
+        # being fixed. Mirrors the "registered tool wins" precedence in
+        # normalize_response so outbound and inbound agree on who owns a
+        # contested name.
+        def _normalize_to_mcp_wire(name: str) -> str:
+            """OAuth wire form of a tool name (no aliasing): mcp__<...>."""
             if name.startswith("mcp__"):
                 return name  # already correct, don't double-prefix
             if name.startswith("mcp_"):
@@ -3035,10 +2921,28 @@ def build_anthropic_kwargs(
                 return "mcp__" + name[len("mcp_"):]
             return _MCP_TOOL_PREFIX + name  # bare name -> mcp__<name>
 
+        _claimed_wire_names = {
+            _normalize_to_mcp_wire(tool["name"])
+            for tool in (anthropic_tools or [])
+            if isinstance(tool.get("name"), str)
+            and tool["name"] not in _OAUTH_TOOL_NAME_ALIASES
+        }
+
+        def _to_oauth_wire_name(name: str) -> str:
+            if name in _OAUTH_TOOL_NAME_ALIASES:
+                aliased = _OAUTH_TOOL_NAME_ALIASES[name]
+                if _MCP_TOOL_PREFIX + aliased not in _claimed_wire_names:
+                    name = aliased
+            return _normalize_to_mcp_wire(name)
+
         if anthropic_tools:
             for tool in anthropic_tools:
                 if "name" in tool:
                     tool["name"] = _to_oauth_wire_name(tool["name"])
+                description = tool.get("description")
+                if isinstance(description, str):
+                    # Prose-safe aliases only — see _OAUTH_PROSE_ALIAS_NAMES.
+                    tool["description"] = _apply_oauth_prose_aliases(description)
 
         # 4. Apply the same normalization to tool names in message history
         #    (tool_use blocks) so replayed turns match the wire names above.
@@ -3072,8 +2976,18 @@ def build_anthropic_kwargs(
             # Anthropic has no tool_choice "none" — omit tools entirely to prevent use
             kwargs.pop("tools", None)
         elif isinstance(tool_choice, str):
-            # Specific tool name
-            kwargs["tool_choice"] = {"type": "tool", "name": tool_choice}
+            # Specific tool name. Under OAuth every tool on the wire is
+            # mcp__-prefixed and/or alias-renamed (see _to_oauth_wire_name
+            # above) — route the forced name through the same normalizer so
+            # tool_choice always matches the corresponding tools[] entry.
+            # Left un-normalized, a forced ``session_search``/``memory``
+            # choice would (a) still carry the literal trigger string onto
+            # the wire, defeating the alias, and (b) reference a tool name
+            # that no longer exists in ``tools[]``, which Anthropic rejects.
+            wire_tool_choice = tool_choice
+            if is_oauth:
+                wire_tool_choice = _to_oauth_wire_name(tool_choice)
+            kwargs["tool_choice"] = {"type": "tool", "name": wire_tool_choice}
 
     # Map reasoning_config to Anthropic's thinking parameter.
     # Claude 4.6+ models use adaptive thinking + output_config.effort.
@@ -3133,12 +3047,15 @@ def build_anthropic_kwargs(
         for _sampling_key in ("temperature", "top_p", "top_k"):
             kwargs.pop(_sampling_key, None)
 
-    # ── Fast mode (Opus 4.6 only) ────────────────────────────────────
+    # ── Fast mode (Opus 4.8 / Opus 5) ────────────────────────────────
     # Adds extra_body.speed="fast" + the fast-mode beta header for ~2.5x
-    # output speed. Per Anthropic docs, fast mode is only supported on
-    # Opus 4.6 — Opus 4.7 and other models 400 on the speed parameter.
+    # output speed. Per Anthropic docs the speed param is supported on
+    # Opus 4.8 and Opus 5 (research preview); Opus 4.7 400s on it and
+    # Opus 4.6 silently ignores it (standard speed, standard billing).
     # Only for native Anthropic endpoints — third-party providers would
-    # reject the unknown beta header and speed parameter.
+    # reject the unknown beta header and speed parameter, and Anthropic
+    # itself scopes fast mode to the Claude API (not Bedrock/Vertex/
+    # Foundry).
     if (
         fast_mode
         and not _is_third_party_anthropic_endpoint(base_url)
@@ -3267,12 +3184,21 @@ def create_anthropic_message(
                     for _event in stream:
                         try:
                             on_stream_event(_event)
+                        except TimeoutError:
+                            # The callback is the caller's deadline seam
+                            # (#99692: the host waiting on this summary has
+                            # already given up). Abandon the stream — the
+                            # ``with`` closes it — instead of streaming an
+                            # answer nobody will read.
+                            raise
                         except Exception:
                             logger.debug(
                                 "%son_stream_event callback failed",
                                 log_prefix, exc_info=True,
                             )
                 return stream.get_final_message()
+        except TimeoutError:
+            raise
         except Exception as exc:
             if not _is_stream_unavailable_error(exc):
                 raise
