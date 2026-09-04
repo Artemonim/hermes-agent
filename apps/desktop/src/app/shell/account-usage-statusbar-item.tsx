@@ -139,6 +139,26 @@ export function tightestAccountUsageWindow(snapshot: AccountUsageSnapshot): Acco
   return tightest
 }
 
+// * Compact chip ratio uses whole dollars so a $20 key reads as $19/20, not $19.29/20.00.
+export function formatCompactQuotaRatio(
+  remaining: null | number | undefined,
+  limit: null | number | undefined
+): string | null {
+  const rem = finiteCredits(remaining)
+  const lim = finiteCredits(limit)
+  if (rem === null || lim === null) {
+    return null
+  }
+
+  const roundedLimit = Math.round(lim)
+  if (roundedLimit <= 0) {
+    return null
+  }
+
+  const roundedRemaining = Math.min(roundedLimit, Math.max(0, Math.round(rem)))
+  return `$${roundedRemaining}/${roundedLimit}`
+}
+
 function accountUsageSettingsUrl(provider: string): string | undefined {
   return ACCOUNT_USAGE_SETTINGS_URLS[provider.trim().toLowerCase()]
 }
@@ -338,27 +358,42 @@ export function accountUsageSnapshotMatchesProvider(
   return snapshot.provider.trim().toLowerCase() === provider.trim().toLowerCase()
 }
 
-function accountUsageChipLabel({
+export function accountUsageChipLabel({
   copy,
   credits,
   providerName,
+  quotaRatio,
   remaining
 }: {
   copy: { accountUsage: string; accountUsageLeft: (remaining: number) => string }
   credits: string | null
   providerName: string
+  quotaRatio: string | null
   remaining: number | null
 }): string {
-  if (credits !== null && remaining !== null) {
-    return `${providerName}: ${credits} (${remaining}%)`
+  const parenParts: string[] = []
+  if (quotaRatio) {
+    parenParts.push(quotaRatio)
+  }
+  if (remaining !== null) {
+    parenParts.push(`${remaining}%`)
+  }
+  const parens = parenParts.length > 0 ? ` (${parenParts.join(', ')})` : ''
+
+  if (credits !== null) {
+    return `${providerName}: ${credits}${parens}`
+  }
+
+  if (quotaRatio !== null && remaining !== null) {
+    return `${providerName}: ${quotaRatio} (${remaining}%)`
   }
 
   if (remaining !== null) {
     return `${providerName}: ${copy.accountUsageLeft(remaining)}`
   }
 
-  if (credits !== null) {
-    return `${providerName}: ${credits}`
+  if (quotaRatio !== null) {
+    return `${providerName}: ${quotaRatio}`
   }
 
   return copy.accountUsage
@@ -373,6 +408,8 @@ export function useAccountUsageStatusbarItem(options: AccountUsageOptions & { us
   // * snapshot.provider is usable.
   const matchedSnapshot = accountUsageSnapshotMatchesProvider(snapshot, options.provider) ? snapshot : null
   const remaining = matchedSnapshot ? accountUsageMinRemaining(matchedSnapshot) : null
+  const tightest = matchedSnapshot ? tightestAccountUsageWindow(matchedSnapshot) : null
+  const quotaRatio = tightest ? formatCompactQuotaRatio(tightest.limit_remaining, tightest.limit) : null
   const creditsValue = matchedSnapshot ? finiteCredits(matchedSnapshot.credits_balance) : null
   const credits = creditsValue === null ? null : formatCreditsBalance(creditsValue, locale)
   const providerName = accountUsageProviderLabel(options.provider)
@@ -388,7 +425,7 @@ export function useAccountUsageStatusbarItem(options: AccountUsageOptions & { us
       hidden: !hasSession || !hasProvider || methodUnavailable || unsupported || !matchedSnapshot,
       icon: loading && matchedSnapshot ? <Loader2 className="size-3 animate-spin" /> : <BarChart3 className="size-3" />,
       id: 'account-usage',
-      label: accountUsageChipLabel({ copy, credits, providerName, remaining }),
+      label: accountUsageChipLabel({ copy, credits, providerName, quotaRatio, remaining }),
       menuAlign: 'end',
       menuClassName: 'w-auto border-(--ui-stroke-secondary) p-0',
       menuContent: matchedSnapshot ? (
@@ -417,6 +454,7 @@ export function useAccountUsageStatusbarItem(options: AccountUsageOptions & { us
       options.usage,
       matchedSnapshot,
       providerName,
+      quotaRatio,
       refresh,
       remaining,
       unsupported
