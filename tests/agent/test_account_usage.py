@@ -271,6 +271,70 @@ def test_codex_usage_treats_wham_used_percent_as_used_not_remaining(monkeypatch)
     assert "86% used" not in rendered
 
 
+@pytest.mark.parametrize("provider", ["", "auto", "custom", "gemini"])
+def test_fetch_account_usage_returns_none_without_calling_fetchers(monkeypatch, provider):
+    def _boom(*_args, **_kwargs):
+        raise AssertionError("fetcher must not run")
+
+    monkeypatch.setattr(account_usage, "_fetch_codex_account_usage", _boom)
+    monkeypatch.setattr(account_usage, "_fetch_anthropic_account_usage", _boom)
+    monkeypatch.setattr(account_usage, "_fetch_openrouter_account_usage", _boom)
+
+    assert account_usage.fetch_account_usage(provider) is None
+
+
+def test_anthropic_explicit_api_key_is_used_instead_of_resolver(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        account_usage,
+        "resolve_anthropic_token",
+        lambda: "profile-token-A",
+    )
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeClient(
+            calls,
+            {"five_hour": {"utilization": 0.1, "resets_at": "2026-07-16T02:00:00Z"}},
+        ),
+    )
+
+    snapshot = account_usage.fetch_account_usage(
+        "anthropic",
+        api_key="sk-ant-oat-live-token-B",
+    )
+
+    assert snapshot is not None
+    assert snapshot.available
+    assert len(calls) == 1
+    assert calls[0]["headers"]["Authorization"] == "Bearer sk-ant-oat-live-token-B"
+    assert "profile-token-A" not in calls[0]["headers"]["Authorization"]
+
+
+def test_anthropic_without_explicit_key_uses_resolver_token(monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        account_usage,
+        "resolve_anthropic_token",
+        lambda: "sk-ant-oat-profile-token-A",
+    )
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeClient(
+            calls,
+            {"five_hour": {"utilization": 0.2, "resets_at": "2026-07-16T02:00:00Z"}},
+        ),
+    )
+
+    snapshot = account_usage.fetch_account_usage("anthropic")
+
+    assert snapshot is not None
+    assert snapshot.available
+    assert len(calls) == 1
+    assert calls[0]["headers"]["Authorization"] == "Bearer sk-ant-oat-profile-token-A"
+
+
 def test_serialize_account_usage_snapshot_is_json_safe(codex_usage_payload, monkeypatch):
     calls = []
     monkeypatch.setattr(
@@ -317,6 +381,137 @@ def test_serialize_account_usage_snapshot_sanitizes_non_finite_percentages():
         100.0,
     ]
     json.dumps(payload, allow_nan=False)
+
+
+def test_openrouter_credits_balance_is_credits_minus_usage(monkeypatch):
+    class _RoutingClient:
+        def __init__(self, payloads):
+            self._payloads = payloads
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def get(self, url, headers):
+            return _FakeResponse(self._payloads[url])
+
+    monkeypatch.setattr(
+        account_usage,
+        "resolve_runtime_provider",
+        lambda requested, explicit_base_url=None, explicit_api_key=None: {
+            "provider": "openrouter",
+            "base_url": "https://openrouter.ai/api/v1",
+            "api_key": "sk-test",
+        },
+    )
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout=10.0: _RoutingClient(
+            {
+                "https://openrouter.ai/api/v1/credits": {
+                    "data": {"total_credits": 300.0, "total_usage": 10.92}
+                },
+                "https://openrouter.ai/api/v1/key": {"data": {}},
+            }
+        ),
+    )
+
+    snapshot = account_usage.fetch_account_usage("openrouter")
+
+    assert snapshot is not None
+    assert snapshot.credits_balance == 289.08
+    assert snapshot.details[0] == "Credits balance: $289.08"
+
+
+def test_codex_numeric_credits_balance_matches_details_string(monkeypatch, codex_usage_payload):
+    payload = dict(codex_usage_payload)
+    payload["credits"] = {"has_credits": True, "balance": 12.5}
+    calls = []
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeClient(calls, payload),
+    )
+
+    snapshot = account_usage.fetch_account_usage(
+        "openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="live-agent-token",
+    )
+
+    assert snapshot is not None
+    assert snapshot.credits_balance == 12.5
+    assert "Credits balance: $12.50" in snapshot.details
+
+
+def test_codex_unlimited_credits_leave_credits_balance_unset(monkeypatch, codex_usage_payload):
+    payload = dict(codex_usage_payload)
+    payload["credits"] = {"has_credits": True, "unlimited": True}
+    calls = []
+    monkeypatch.setattr(
+        account_usage.httpx,
+        "Client",
+        lambda timeout: _FakeClient(calls, payload),
+    )
+
+    snapshot = account_usage.fetch_account_usage(
+        "openai-codex",
+        base_url="https://chatgpt.com/backend-api/codex",
+        api_key="live-agent-token",
+    )
+
+    assert snapshot is not None
+    assert snapshot.credits_balance is None
+    assert "Credits balance: unlimited" in snapshot.details
+
+
+def test_render_account_usage_lines_ignores_credits_balance_field():
+    shared = dict(
+        provider="openai-codex",
+        source="usage_api",
+        fetched_at=datetime(2026, 7, 16, 1, 2, 3, tzinfo=timezone.utc),
+        plan="Plus",
+        windows=(
+            account_usage.AccountUsageWindow(label="Session", used_percent=27),
+        ),
+        details=("Credits balance: $12.50",),
+    )
+    without = account_usage.AccountUsageSnapshot(**shared)
+    with_balance = account_usage.AccountUsageSnapshot(**shared, credits_balance=12.5)
+
+    assert account_usage.render_account_usage_lines(without) == (
+        account_usage.render_account_usage_lines(with_balance)
+    )
+    assert account_usage.render_account_usage_lines(without, markdown=True) == (
+        account_usage.render_account_usage_lines(with_balance, markdown=True)
+    )
+
+
+def test_serialize_account_usage_snapshot_sanitizes_non_finite_credits_balance():
+    snapshot = account_usage.AccountUsageSnapshot(
+        provider="openrouter",
+        source="credits_api",
+        fetched_at=datetime.now(timezone.utc),
+        credits_balance=float("inf"),
+    )
+
+    payload = account_usage.serialize_account_usage_snapshot(snapshot)
+
+    assert payload["credits_balance"] is None
+    json.dumps(payload, allow_nan=False)
+
+    nan_snapshot = account_usage.AccountUsageSnapshot(
+        provider="openrouter",
+        source="credits_api",
+        fetched_at=datetime.now(timezone.utc),
+        credits_balance=float("nan"),
+    )
+    assert account_usage.serialize_account_usage_snapshot(nan_snapshot)[
+        "credits_balance"
+    ] is None
 
 
 # ── Banked rate-limit reset credits (`/usage reset`) ─────────────────────────

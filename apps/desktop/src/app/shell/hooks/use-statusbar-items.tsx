@@ -4,8 +4,8 @@ import { useNavigate } from 'react-router'
 
 import { ConnectionSwitcher } from '@/app/chat/sidebar/connection-switcher'
 import type { CommandCenterSection } from '@/app/command-center'
+import { useAccountUsageStatusbarItem } from '@/app/shell/account-usage-statusbar-item'
 import { useApprovalModeStatusbarItem } from '@/app/shell/approval-mode-menu'
-import { useCodexUsageStatusbarItem } from '@/app/shell/codex-usage-statusbar-item'
 import { ContextUsagePanel } from '@/app/shell/context-usage-panel'
 import { GatewayMenuPanel } from '@/app/shell/gateway-menu-panel'
 import { useContextBreakdown } from '@/app/shell/hooks/use-context-breakdown'
@@ -13,8 +13,8 @@ import { useSystemResourcesStatusbarItem } from '@/app/shell/system-resources-st
 import { $paneVisible, togglePaneVisible } from '@/components/pane-shell/tree/store'
 import { Codicon } from '@/components/ui/codicon'
 import { GlyphSpinner } from '@/components/ui/glyph-spinner'
+import { accountUsageCacheIdentity, createAccountUsageRequester, type GatewayRequester } from '@/hooks/use-account-usage'
 import { useI18n } from '@/i18n'
-import type { GatewayRequester } from '@/hooks/use-codex-account-usage'
 import { displayPath, pathLeaf } from '@/lib/display-path'
 import {
   Activity,
@@ -52,7 +52,12 @@ import {
   idsShareLineage,
   sessionMatchesStoredId
 } from '@/store/session'
-import { $focusedRuntimeId, $focusedSessionState, $focusedStoredSessionId } from '@/store/session-states'
+import {
+  $focusedRuntimeId,
+  $focusedSessionState,
+  $focusedStoredSessionId,
+  knownOwnerForSession
+} from '@/store/session-states'
 import { $statusbarHiddenIds } from '@/store/statusbar-prefs'
 import { $subagentsBySession, activeSubagentCount, failedSubagentCount } from '@/store/subagents'
 import { $gatewayRestarting } from '@/store/system-actions'
@@ -293,13 +298,27 @@ export function useStatusbarItems({
   const approvalModeItem = useApprovalModeStatusbarItem(activeGatewayProfile, requestGateway)
   const systemResourcesItem = useSystemResourcesStatusbarItem()
 
-  const codexUsageItem = useCodexUsageStatusbarItem({
+  const sessionOwner = knownOwnerForSession(activeSessionId)
+  // * Cache key must agree with the owner route the RPC uses — ambient
+  // * connection/profile would collide two sessions on different backends.
+  const accountUsageCache = accountUsageCacheIdentity(sessionOwner, {
     connectionScope: `${connection?.mode ?? 'unknown'}:${connection?.baseUrl ?? ''}`,
+    profile: activeGatewayProfile
+  })
+  const requestAccountUsage = useMemo(
+    () => createAccountUsageRequester(sessionOwner, requestGateway),
+    [requestGateway, sessionOwner]
+  )
+
+  const accountUsageItem = useAccountUsageStatusbarItem({
+    connectionScope: accountUsageCache.connectionScope,
     gatewayState,
-    profile: activeGatewayProfile,
+    owner: sessionOwner,
+    profile: accountUsageCache.profile,
     provider,
-    requestGateway,
-    sessionId: activeSessionId
+    requestGateway: requestAccountUsage,
+    sessionId: activeSessionId,
+    usage: currentUsage
   })
 
   const gatewayMenuContent = useMemo(
@@ -577,7 +596,6 @@ export function useStatusbarItems({
         toggleLabel: copy.toggleRunningTimer,
         variant: 'text'
       },
-      codexUsageItem,
       {
         detail: contextBar || undefined,
         // Never self-hide: the user opted this item in (it's hidden-by-
@@ -594,6 +612,7 @@ export function useStatusbarItems({
         toggleLabel: copy.toggleContextUsage,
         variant: 'menu'
       },
+      accountUsageItem,
       {
         icon: <Layers3 className="size-3" />,
         id: 'cache-hit-rate',
@@ -646,8 +665,8 @@ export function useStatusbarItems({
       busy,
       cacheHit,
       chatOpen,
+      accountUsageItem,
       clientVersionItem,
-      codexUsageItem,
       contextBar,
       contextBreakdown,
       contextBreakdownLoading,

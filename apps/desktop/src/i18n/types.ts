@@ -2616,6 +2616,7 @@ export interface Translations {
       hideStatusbar: string
       resetStatusbar: string
       toggleApprovalMode: string
+      toggleAccountUsage: string
       toggleBackendVersion: string
       toggleCacheHitRate: string
       toggleCommandCenter: string
@@ -2642,17 +2643,17 @@ export interface Translations {
       openStarmap: string
       turnRunning: string
       currentTurnElapsed: string
-      codexUsage: string
-      codexUsageLabel: (remaining: number) => string
-      openCodexUsage: string
-      codexUsagePanel: {
-        openUsage: string
+      accountUsage: string
+      accountUsageLeft: (remaining: number) => string
+      accountUsagePanel: {
+        openUsageSettings: string
         plan: (plan: string) => string
         refresh: string
         remaining: (remaining: number) => string
         resets: (time: string) => string
+        sessionLine: (input: string, output: string, total: string) => string
         stale: string
-        subscription: string
+        thisSession: string
         title: string
         unavailable: string
         updated: (time: string) => string
