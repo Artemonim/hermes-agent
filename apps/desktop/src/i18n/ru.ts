@@ -3097,6 +3097,7 @@ export const ru = defineLocale({
       hideStatusbar: 'Скрыть статус-бар',
       resetStatusbar: 'Сбросить к значениям по умолчанию',
       toggleApprovalMode: 'Подтверждения',
+      toggleAccountUsage: 'Лимиты аккаунта',
       toggleBackendVersion: 'Версия бэкенда',
       toggleCacheHitRate: 'Попадания в кэш',
       toggleCommandCenter: 'Командный центр',
@@ -3122,6 +3123,23 @@ export const ru = defineLocale({
       starmap: 'Граф памяти',
       openStarmap: 'Открыть граф памяти',
       turnRunning: 'Выполняется',
+      accountUsage: 'Лимиты аккаунта',
+      accountUsageLeft: remaining => `осталось ${remaining}%`,
+      accountUsagePanel: {
+        openUsageSettings: 'Открыть настройки использования',
+        plan: plan => `план ${plan}`,
+        refresh: 'Обновить',
+        remaining: remaining => `осталось ${remaining}%`,
+        resets: time => `сброс ${time}`,
+        sessionLine: (input, output, total) => `${input} вх. · ${output} исх. · ${total} всего`,
+        stale: 'Не удалось обновить данные. Показан последний успешный результат.',
+        thisSession: 'Этот сеанс',
+        title: 'Лимиты аккаунта',
+        unavailable: 'Недоступно',
+        updated: time => `Обновлено ${time}`,
+        updatedUnknown: 'Время обновления неизвестно',
+        used: used => `использовано ${used}%`
+      },
       contextUsage: 'Использование контекста',
       contextUsagePanel: {
         categories: {

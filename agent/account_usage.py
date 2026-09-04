@@ -22,6 +22,8 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
+SUPPORTED_ACCOUNT_USAGE_PROVIDERS = frozenset({"openai-codex", "anthropic", "openrouter"})
+
 
 def _utc_now() -> datetime:
     return datetime.now(timezone.utc)
@@ -45,6 +47,7 @@ class AccountUsageSnapshot:
     windows: tuple[AccountUsageWindow, ...] = ()
     details: tuple[str, ...] = ()
     unavailable_reason: Optional[str] = None
+    credits_balance: Optional[float] = None
 
     @property
     def available(self) -> bool:
@@ -155,6 +158,11 @@ def serialize_account_usage_snapshot(snapshot: AccountUsageSnapshot) -> dict[str
         ],
         "details": list(snapshot.details),
         "unavailable_reason": snapshot.unavailable_reason,
+        "credits_balance": (
+            round(float(snapshot.credits_balance), 2)
+            if _is_finite_num(snapshot.credits_balance)
+            else None
+        ),
     }
 
 
@@ -618,10 +626,12 @@ def _fetch_codex_account_usage(
             f"You have {count} reset{plural} banked - use /usage reset to activate"
         )
     credits = payload.get("credits") or {}
+    credits_balance: Optional[float] = None
     if credits.get("has_credits"):
         balance = credits.get("balance")
         if isinstance(balance, (int, float)):
-            details.append(f"Credits balance: ${float(balance):.2f}")
+            credits_balance = float(balance)
+            details.append(f"Credits balance: ${credits_balance:.2f}")
         elif credits.get("unlimited"):
             details.append("Credits balance: unlimited")
     return AccountUsageSnapshot(
@@ -631,6 +641,7 @@ def _fetch_codex_account_usage(
         plan=_title_case_slug(payload.get("plan_type")),
         windows=tuple(windows),
         details=tuple(details),
+        credits_balance=credits_balance,
     )
 
 
@@ -819,8 +830,13 @@ def redeem_codex_reset_credit(
     )
 
 
-def _fetch_anthropic_account_usage() -> Optional[AccountUsageSnapshot]:
-    token = (resolve_anthropic_token() or "").strip()
+def _fetch_anthropic_account_usage(
+    api_key: Optional[str] = None,
+) -> Optional[AccountUsageSnapshot]:
+    if api_key is not None:
+        token = str(api_key or "").strip()
+    else:
+        token = (resolve_anthropic_token() or "").strip()
     if not token:
         return None
     if not _is_oauth_token(token):
@@ -908,7 +924,8 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
             key_data = {}
     total_credits = float(credits.get("total_credits") or 0.0)
     total_usage = float(credits.get("total_usage") or 0.0)
-    details = [f"Credits balance: ${max(0.0, total_credits - total_usage):.2f}"]
+    credits_balance = max(0.0, total_credits - total_usage)
+    details = [f"Credits balance: ${credits_balance:.2f}"]
     windows: list[AccountUsageWindow] = []
     limit = key_data.get("limit")
     limit_remaining = key_data.get("limit_remaining")
@@ -949,6 +966,7 @@ def _fetch_openrouter_account_usage(base_url: Optional[str], api_key: Optional[s
         fetched_at=_utc_now(),
         windows=tuple(windows),
         details=tuple(details),
+        credits_balance=credits_balance,
     )
 
 
@@ -961,11 +979,13 @@ def fetch_account_usage(
     normalized = str(provider or "").strip().lower()
     if normalized in {"", "auto", "custom"}:
         return None
+    if normalized not in SUPPORTED_ACCOUNT_USAGE_PROVIDERS:
+        return None
     try:
         if normalized == "openai-codex":
             return _fetch_codex_account_usage(base_url=base_url, api_key=api_key)
         if normalized == "anthropic":
-            return _fetch_anthropic_account_usage()
+            return _fetch_anthropic_account_usage(api_key=api_key)
         if normalized == "openrouter":
             return _fetch_openrouter_account_usage(base_url, api_key)
     except Exception:

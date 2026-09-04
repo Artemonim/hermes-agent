@@ -758,6 +758,7 @@ export interface AccountUsageWindow {
 
 export interface AccountUsageSnapshot {
   available?: boolean
+  credits_balance?: null | number
   details: string[]
   fetched_at: string
   plan?: null | string
@@ -770,6 +771,8 @@ export interface AccountUsageSnapshot {
 
 export interface AccountUsageResponse {
   account_usage?: AccountUsageSnapshot | null
+  reason?: string
+  status?: 'ok' | 'unavailable' | 'unsupported'
 }
 
 /** One graph node in the star map (learned skill or memory chunk). */
