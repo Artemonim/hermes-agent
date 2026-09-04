@@ -2724,7 +2724,33 @@ export const ja = defineLocale({
         unavailable: '利用不可',
         updated: time => `更新: ${time}`,
         updatedUnknown: '更新時刻は不明です',
-        used: used => `${used}% 使用済み`
+        used: used => `${used}% 使用済み`,
+        apiKeyUsage: 'APIキーの使用量',
+        bankedResets: count =>
+          `バンク済みのリセットが${count}回あります。/usage reset で有効化できます`,
+        creditsBalance: 'クレジット残高',
+        creditsUnlimited: '無制限',
+        extraUsage: '追加使用量',
+        extraUsageValue: (used, limit) => `${used} / ${limit}`,
+        ofLimitRemaining: (remaining, limit) => `残り ${remaining} / ${limit}`,
+        resetIntervals: {
+          daily: '毎日リセット',
+          monthly: '毎月リセット',
+          weekly: '毎週リセット'
+        },
+        usageThisMonth: value => `今月 ${value}`,
+        usageThisWeek: value => `今週 ${value}`,
+        usageToday: value => `今日 ${value}`,
+        usageTotal: value => `合計 ${value}`,
+        windowLabels: {
+          api_key_quota: 'APIキーのクォータ',
+          current_session: '現在のセッション',
+          current_week: '今週',
+          opus_week: 'Opus の週',
+          session: 'セッション',
+          sonnet_week: 'Sonnet の週',
+          weekly: '週間'
+        }
       },
       contextUsage: 'コンテキスト使用状況',
       systemResources: {

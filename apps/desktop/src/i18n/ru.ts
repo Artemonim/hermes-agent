@@ -3138,7 +3138,33 @@ export const ru = defineLocale({
         unavailable: 'Недоступно',
         updated: time => `Обновлено ${time}`,
         updatedUnknown: 'Время обновления неизвестно',
-        used: used => `использовано ${used}%`
+        used: used => `использовано ${used}%`,
+        apiKeyUsage: 'Использование API-ключа',
+        bankedResets: count =>
+          `У вас ${count} ${RU_PLURAL(count, 'сохранённый сброс', 'сохранённых сброса', 'сохранённых сбросов')} — используйте /usage reset, чтобы активировать`,
+        creditsBalance: 'Баланс кредитов',
+        creditsUnlimited: 'Безлимитно',
+        extraUsage: 'Дополнительное использование',
+        extraUsageValue: (used, limit) => `${used} / ${limit}`,
+        ofLimitRemaining: (remaining, limit) => `осталось ${remaining} из ${limit}`,
+        resetIntervals: {
+          daily: 'сброс ежедневно',
+          monthly: 'сброс ежемесячно',
+          weekly: 'сброс еженедельно'
+        },
+        usageThisMonth: value => `${value} за месяц`,
+        usageThisWeek: value => `${value} за неделю`,
+        usageToday: value => `${value} сегодня`,
+        usageTotal: value => `${value} всего`,
+        windowLabels: {
+          api_key_quota: 'Квота API-ключа',
+          current_session: 'Текущий сеанс',
+          current_week: 'Текущая неделя',
+          opus_week: 'Неделя Opus',
+          session: 'Сеанс',
+          sonnet_week: 'Неделя Sonnet',
+          weekly: 'Неделя'
+        }
       },
       contextUsage: 'Использование контекста',
       contextUsagePanel: {

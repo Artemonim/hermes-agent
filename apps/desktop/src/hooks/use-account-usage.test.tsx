@@ -197,6 +197,39 @@ describe('useAccountUsage', () => {
     expect(result.current.methodUnavailable).toBe(false)
   })
 
+  it('forwards structured localization fields from the wire snapshot', async () => {
+    const structured = snapshot(10, {
+      details: ['Credits balance: $31.44'],
+      details_structured: true,
+      rows: [{ args: { currency: 'USD', value: 31.44 }, key: 'credits_balance' }],
+      windows: [
+        {
+          label: 'API key quota',
+          label_key: 'api_key_quota',
+          limit: 14.25,
+          limit_remaining: 4.09,
+          reset_interval: 'weekly',
+          used_percent: 10
+        }
+      ]
+    })
+    const requestGateway = vi
+      .fn<() => Promise<AccountUsageResponse>>()
+      .mockResolvedValue({ account_usage: structured, status: 'ok' })
+    const { result } = renderHook(() => useAccountUsage(options(requestGateway as never, { provider: 'openrouter' })), {
+      wrapper: queryWrapper()
+    })
+
+    await waitFor(() => expect(result.current.snapshot?.details_structured).toBe(true))
+    expect(result.current.snapshot?.rows).toEqual([{ args: { currency: 'USD', value: 31.44 }, key: 'credits_balance' }])
+    expect(result.current.snapshot?.windows[0]).toMatchObject({
+      label_key: 'api_key_quota',
+      limit: 14.25,
+      limit_remaining: 4.09,
+      reset_interval: 'weekly'
+    })
+  })
+
   it('treats unsupported as a terminal stop', async () => {
     const requestGateway = vi
       .fn<() => Promise<AccountUsageResponse>>()
