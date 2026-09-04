@@ -57,6 +57,27 @@ def _slow_obs():
     return obs
 
 
+def _validation_agent():
+    """Minimal agent for ``validate_tool_calls`` production-home tests."""
+    agent = _agent(service_tier="flex", escalation=_enabled_cfg(consecutive=1))
+    agent.valid_tool_names = {"web_search"}
+    agent._uniquify_tool_call_ids = lambda tcs: tcs
+    agent._repair_tool_call = lambda name: None
+    agent._invalid_tool_retries = 0
+    agent._invalid_json_retries = 0
+    agent._buffer_vprint = lambda *_a, **_k: None
+    agent._vprint = lambda *_a, **_k: None
+    agent.log_prefix = ""
+    agent.quiet_mode = True
+    agent._flush_status_buffer = lambda: None
+    agent._persist_session = lambda *_a, **_k: None
+    agent._cleanup_task_resources = lambda *_a, **_k: None
+    agent._build_assistant_message = (
+        lambda msg, _fr: {"role": "assistant", "content": getattr(msg, "content", ""), "tool_calls": msg.tool_calls}
+    )
+    return agent
+
+
 class TestServiceTierEscalationStateMachine:
     def test_ladder_flex_default_priority_and_cap(self):
         state = ServiceTierEscalationState(
@@ -510,6 +531,144 @@ class TestInjectAndContinueUnlocksWire:
         assert agent._service_tier_escalation.wire_locked is False
         assert agent._service_tier_escalation.effective_tier == "flex"
         assert agent._service_tier_escalation.pending_ttft is None
+
+    def test_invalid_json_retry_keeps_wire_locked_until_inject(self):
+        """Production ``validate_tool_calls`` retry must not accept."""
+        from agent.turn_tool_validation import validate_tool_calls
+
+        agent = _validation_agent()
+        begin_logical_request(agent)
+        finish_request_ttft(agent, _slow_obs())
+        tc = SimpleNamespace(
+            function=SimpleNamespace(name="web_search", arguments="{not json}"),
+            id="c1",
+        )
+        assistant = SimpleNamespace(tool_calls=[tc], content="")
+        first = validate_tool_calls(
+            agent, assistant, "tool_calls",
+            messages=[], conversation_history=[], api_call_count=1,
+            effective_task_id="t1",
+        )
+        assert first.action == "continue"
+        assert agent._invalid_json_retries == 1
+        assert agent._service_tier_escalation.wire_locked is True
+
+        second = validate_tool_calls(
+            agent, assistant, "tool_calls",
+            messages=[], conversation_history=[], api_call_count=2,
+            effective_task_id="t1",
+        )
+        assert second.action == "continue"
+        assert agent._invalid_json_retries == 2
+        assert agent._service_tier_escalation.wire_locked is True
+
+        messages = []
+        injected = validate_tool_calls(
+            agent, assistant, "tool_calls",
+            messages=messages, conversation_history=[], api_call_count=3,
+            effective_task_id="t1",
+        )
+        assert injected.action == "continue"
+        assert messages, "inject path must mutate history"
+        assert agent._service_tier_escalation.wire_locked is False
+
+    def test_invalid_tool_name_inject_accepts_logical_request(self):
+        """Unknown-tool inject mutates history — dest dest site ~7878."""
+        from agent.turn_tool_validation import validate_tool_calls
+
+        agent = _validation_agent()
+        begin_logical_request(agent)
+        finish_request_ttft(agent, _slow_obs())
+        tc = SimpleNamespace(
+            function=SimpleNamespace(name="not_a_real_tool", arguments="{}"),
+            id="c1",
+        )
+        assistant = SimpleNamespace(tool_calls=[tc], content="")
+        messages = []
+        verdict = validate_tool_calls(
+            agent, assistant, "tool_calls",
+            messages=messages, conversation_history=[], api_call_count=1,
+            effective_task_id="t1",
+        )
+        assert verdict.action == "continue"
+        assert messages, "invalid-name inject must mutate history"
+        assert agent._service_tier_escalation.wire_locked is False
+
+    def test_ok_tool_validation_accepts_logical_request(self):
+        from agent.turn_tool_validation import validate_tool_calls
+
+        agent = _validation_agent()
+        begin_logical_request(agent)
+        finish_request_ttft(agent, _slow_obs())
+        tc = SimpleNamespace(
+            function=SimpleNamespace(name="web_search", arguments="{}"),
+            id="c1",
+        )
+        assistant = SimpleNamespace(tool_calls=[tc], content="")
+        verdict = validate_tool_calls(
+            agent, assistant, "tool_calls",
+            messages=[], conversation_history=[], api_call_count=1,
+            effective_task_id="t1",
+        )
+        assert verdict.action == "ok"
+        assert agent._service_tier_escalation.wire_locked is False
+
+    def test_codex_incomplete_accepts_only_on_history_mutation(self):
+        from agent.turn_truncation import continue_codex_incomplete
+
+        def _codex_agent():
+            agent = _agent(service_tier="flex", escalation=_enabled_cfg(consecutive=1))
+            agent._codex_incomplete_retries = 0
+            agent.quiet_mode = True
+            agent.log_prefix = ""
+            agent._vprint = lambda *_a, **_k: None
+            agent._emit_wait_notice = lambda *_a, **_k: None
+            agent._emit_interim_assistant_message = lambda *_a, **_k: None
+            agent._interim_assistant_visible_text = (
+                lambda msg: (msg.get("content") or "") if isinstance(msg, dict) else ""
+            )
+            agent._build_assistant_message = lambda msg, fr: {
+                "role": "assistant",
+                "content": getattr(msg, "content", "") or "",
+                "finish_reason": fr,
+                "reasoning": getattr(msg, "reasoning", "") or "",
+            }
+            agent._persist_session = lambda *_a, **_k: None
+            return agent
+
+        mutated = _codex_agent()
+        begin_logical_request(mutated)
+        finish_request_ttft(mutated, _slow_obs())
+        messages = [{"role": "user", "content": "hi"}]
+        result = continue_codex_incomplete(
+            mutated,
+            SimpleNamespace(content="partial thought", reasoning=""),
+            "incomplete",
+            messages=messages,
+            conversation_history=[],
+            api_call_count=1,
+        )
+        assert result is None
+        assert any(m.get("role") == "assistant" for m in messages)
+        assert mutated._service_tier_escalation.wire_locked is False
+
+        locked = _codex_agent()
+        begin_logical_request(locked)
+        finish_request_ttft(locked, _slow_obs())
+        dup_messages = [
+            {"role": "user", "content": "hi"},
+            {"role": "assistant", "content": "same", "finish_reason": "incomplete"},
+        ]
+        result = continue_codex_incomplete(
+            locked,
+            SimpleNamespace(content="same", reasoning=""),
+            "incomplete",
+            messages=dup_messages,
+            conversation_history=[],
+            api_call_count=1,
+        )
+        assert result is None
+        assert locked._service_tier_escalation.wire_locked is True
 
 
 class TestModelSwitchClearsDefaultBase:

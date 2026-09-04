@@ -3206,6 +3206,7 @@ def _run_fallback_conversation(agent, captured=None):
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),
         patch("run_agent.OpenAI", return_value=MagicMock()),
+        patch("agent.process_bootstrap.OpenAI", return_value=MagicMock()),
         patch("agent.agent_runtime_helpers.time.sleep"),
         patch("agent.conversation_loop.time.sleep"),
         patch(

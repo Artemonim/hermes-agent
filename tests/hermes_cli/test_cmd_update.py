@@ -7,24 +7,26 @@ from unittest.mock import ANY, patch
 
 import pytest
 
-from hermes_cli.main import _resolve_update_branch, cmd_update, PROJECT_ROOT
+from hermes_cli.main import cmd_update, PROJECT_ROOT, _resolve_update_branch
+from hermes_cli import main_web_build
+from hermes_cli import main_install_repair
+from hermes_cli import update_cmd
 
 
-def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0", *, shallow=False):
+def _make_run_side_effect(branch="main", verify_ok=True, commit_count="0", shallow=False):
     """Build a side_effect function for subprocess.run that simulates git commands."""
 
     def side_effect(cmd, **kwargs):
         joined = " ".join(str(c) for c in cmd)
 
-        # git rev-parse --abbrev-ref HEAD  (get current branch)
-        if "rev-parse" in joined and "--abbrev-ref" in joined:
-            return subprocess.CompletedProcess(cmd, 0, stdout=f"{branch}\n", stderr="")
-
-        # git rev-parse --is-shallow-repository
         if "rev-parse" in joined and "--is-shallow-repository" in joined:
             return subprocess.CompletedProcess(
                 cmd, 0, stdout=("true\n" if shallow else "false\n"), stderr=""
             )
+
+        # git rev-parse --abbrev-ref HEAD  (get current branch)
+        if "rev-parse" in joined and "--abbrev-ref" in joined:
+            return subprocess.CompletedProcess(cmd, 0, stdout=f"{branch}\n", stderr="")
 
         # git rev-parse --verify origin/{branch}  (check remote branch exists)
         if "rev-parse" in joined and "--verify" in joined:
@@ -81,67 +83,30 @@ def _patch_managed_uv(request):
         yield
 
 
-_CMD_UPDATE_NEEDS_NODE = (
-    "TestUpdateNodeDependencies",
-    "TestNodeRuntimeNpmResolution",
+_NPM_LIVE_TEST_CLASSES = frozenset({
     "TestCmdUpdateNpmLockfileCache",
-)
+    "TestNodeRuntimeNpmResolution",
+    "TestUpdateNodeDependencies",
+})
 
 
 @pytest.fixture(autouse=True)
-def _no_host_npm_during_cmd_update(request, monkeypatch):
-    """cmd_update e2e tests must not run a real npm ci / Electron rebuild.
+def _stub_node_runtime_npm(request):
+    """Hide a real npm from cmd_update tests that only mock git.
 
-    ``_resolve_node_runtime_npm`` prefers a Hermes-managed npm under
-    HERMES_HOME, so patching ``shutil.which`` is not enough: a temp home
-    with ``node/npm.cmd`` starts ``npm ci`` against PROJECT_ROOT and hangs
-    the 300s file timeout. Classes that actually test Node/npm keep the
-    real resolver.
+    Windows ``find_node_executable_on_path`` walks PATH for ``npm.cmd`` and
+    never calls ``shutil.which``, so ``@patch("shutil.which")`` does not skip
+    the workspace install. Those tests would otherwise run a live ``npm
+    install`` against the checkout.
     """
     cls = getattr(request.node, "cls", None)
-    if cls is not None and cls.__name__ in _CMD_UPDATE_NEEDS_NODE:
+    if cls is not None and cls.__name__ in _NPM_LIVE_TEST_CLASSES:
         yield
         return
-    monkeypatch.setattr("hermes_cli.main._resolve_node_runtime_npm", lambda: None)
-    monkeypatch.setattr(
-        "tools.browser_tool.warm_agent_browser_npx_cache",
-        lambda *a, **k: True,
-    )
-    yield
-
-
-@pytest.fixture(autouse=True)
-def _logged_subprocess_respects_run_mocks(monkeypatch):
-    """Desktop rebuild now streams via Popen, not subprocess.run.
-
-    End-to-end cmd_update tests mock ``subprocess.run`` and used to intercept
-    the Electron spawn that way. Without this, an unstubbed desktop rebuild
-    starts a real ``hermes desktop --build-only``.
-    """
-    import hermes_cli.update_cmd as uc
-
-    real = uc._run_logged_subprocess
-
-    def _via_run_when_mocked(cmd, *, cwd=None, env=None):
-        run = subprocess.run
-        if getattr(run, "side_effect", None) is None and getattr(run, "return_value", None) is None:
-            return real(cmd, cwd=cwd, env=env)
-        try:
-            return run(
-                cmd,
-                cwd=cwd,
-                env=env,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                text=True,
-                encoding="utf-8",
-                errors="replace",
-            )
-        except TypeError:
-            return run(cmd, cwd=cwd, env=env)
-
-    monkeypatch.setattr(uc, "_run_logged_subprocess", _via_run_when_mocked)
-    monkeypatch.setattr("hermes_cli.main._run_logged_subprocess", _via_run_when_mocked)
+    with patch("hermes_cli.main._resolve_node_runtime_npm", return_value=None), patch(
+        "hermes_cli.main_install_repair._resolve_node_runtime_npm", return_value=None
+    ):
+        yield
 
 
 @pytest.fixture(autouse=True)
@@ -176,11 +141,11 @@ class TestCmdUpdateNpmLockfileCache:
         monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
         (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}')
 
-        hm._record_npm_lockfile_hash(tmp_path)
+        update_cmd._record_npm_lockfile_hash(tmp_path)
 
         assert (
             self._cache_file(tmp_path, tmp_path).read_text()
-            == hm._npm_manifests_digest()
+            == update_cmd._npm_manifests_digest()
         )
 
     def test_package_json_only_edit_defeats_skip(self, tmp_path, monkeypatch):
@@ -193,7 +158,7 @@ class TestCmdUpdateNpmLockfileCache:
         (tmp_path / "package-lock.json").write_text('{"lockfileVersion": 3}')
         (tmp_path / "package.json").write_text('{"dependencies": {}}')
         (tmp_path / "node_modules").mkdir()
-        hm._record_npm_lockfile_hash(tmp_path)
+        update_cmd._record_npm_lockfile_hash(tmp_path)
         assert hm._npm_lockfile_changed(tmp_path) is False
 
         (tmp_path / "package.json").write_text(
@@ -234,10 +199,10 @@ class TestCmdUpdateNpmLockfileCache:
             side_effect=lambda root: cache_roots.append(root) or False,
         ):
             monkeypatch.setenv("HERMES_HOME", str(shared_root))
-            hm._update_node_dependencies()
+            update_cmd._update_node_dependencies()
 
             monkeypatch.setenv("HERMES_HOME", str(named_profile))
-            hm._update_node_dependencies()
+            update_cmd._update_node_dependencies()
 
         assert cache_roots == [shared_root, shared_root]
 
@@ -255,7 +220,7 @@ class TestCmdUpdateTermuxUvBootstrap:
         mock_run.return_value = subprocess.CompletedProcess([], 1, stdout="", stderr="")
         monkeypatch.setattr(hm, "_is_termux_env", lambda env=None: True)
 
-        uv_bin = hm._ensure_uv_for_termux(["/termux/python", "-m", "pip"])
+        uv_bin = update_cmd._ensure_uv_for_termux(["/termux/python", "-m", "pip"])
 
         assert uv_bin is None
         assert mock_run.call_count == 1
@@ -283,7 +248,7 @@ class TestCmdUpdateTermuxUvBootstrap:
         monkeypatch.setattr("hermes_cli.managed_uv.resolve_uv", lambda: None)
         monkeypatch.setattr("shutil.which", lambda name: pkg_uv if name == "uv" else None)
 
-        uv_bin = hm._ensure_uv_for_termux(["/termux/python", "-m", "pip"])
+        uv_bin = update_cmd._ensure_uv_for_termux(["/termux/python", "-m", "pip"])
 
         assert uv_bin == pkg_uv
         mock_run.assert_not_called()
@@ -359,7 +324,6 @@ class TestCmdUpdateBranchFallback:
         origin but behind NousResearch/hermes-agent silently misses updates.
         """
         from hermes_cli import main as hm
-        from hermes_cli import update_cmd
 
         mock_run.side_effect = _make_run_side_effect(
             branch="main", verify_ok=True, commit_count="0"
@@ -369,11 +333,7 @@ class TestCmdUpdateBranchFallback:
             hm,
             "_get_origin_url",
             return_value="https://github.com/example/hermes-agent.git",
-        ), patch.object(hm, "_sync_with_upstream_if_needed") as sync_mock, patch.object(
-            update_cmd, "_update_node_dependencies", return_value=[]
-        ), patch.object(
-            update_cmd, "_rebuild_desktop_after_update", return_value=True
-        ):
+        ), patch.object(hm, "_sync_with_upstream_if_needed") as sync_mock:
             cmd_update(mock_args)
 
         expected_git_cmd = (
@@ -416,11 +376,7 @@ class TestCmdUpdateBranchFallback:
             update_cmd, "_add_upstream_remote"
         ) as add_remote, patch.object(
             update_cmd, "_mark_skip_upstream_prompt"
-        ) as mark_skip, patch.object(
-            update_cmd, "_update_node_dependencies", return_value=[]
-        ), patch.object(
-            update_cmd, "_rebuild_desktop_after_update", return_value=True
-        ), patch("builtins.input") as stdin_input:
+        ) as mark_skip, patch("builtins.input") as stdin_input:
             cmd_update(SimpleNamespace(yes=True))
 
         stdin_input.assert_not_called()
@@ -633,98 +589,6 @@ class TestCmdUpdateBranchFallback:
             captured = capsys.readouterr()
             assert "applying safe config migrations" in captured.out
             assert "API keys require manual entry" in captured.out
-
-
-class TestCmdUpdateShallowFetch:
-    """Apply-path fetch must keep shallow installer checkouts at depth 1.
-
-    A bare ``git fetch origin <branch>`` against a shallow local origin fails
-    with ``Could not read <sha>`` / ``did not send all necessary objects``.
-    The --check path already passed ``--depth 1``; the apply path must too.
-    """
-
-    @staticmethod
-    def _origin_fetch_cmds(mock_run):
-        cmds = []
-        for call in mock_run.call_args_list:
-            if not call.args:
-                continue
-            argv = [str(part) for part in call.args[0]]
-            if "fetch" in argv and "origin" in argv:
-                cmds.append(argv)
-        return cmds
-
-    @staticmethod
-    def _run_apply_update():
-        with patch(
-            "hermes_cli.config.load_config",
-            return_value={"updates": {"branch": "dev"}},
-        ), patch("hermes_cli.main._run_pre_update_backup", return_value=None), patch(
-            "hermes_cli.main._update_node_dependencies", return_value=[]
-        ), patch(
-            "hermes_cli.update_cmd._repair_node_deps_on_current_checkout"
-        ), patch(
-            "hermes_cli.main._build_web_ui"
-        ):
-            cmd_update(SimpleNamespace(yes=True))
-
-    @patch("shutil.which", return_value=None)
-    @patch("subprocess.run")
-    def test_apply_fetch_passes_depth_1_on_shallow_checkout(
-        self, mock_run, _mock_which
-    ):
-        mock_run.side_effect = _make_run_side_effect(
-            branch="dev", verify_ok=True, commit_count="0", shallow=True
-        )
-        self._run_apply_update()
-
-        origin_fetches = self._origin_fetch_cmds(mock_run)
-        assert origin_fetches, "expected git fetch origin"
-        for argv in origin_fetches:
-            depth_at = argv.index("--depth")
-            assert argv[depth_at + 1] == "1"
-
-    @patch("shutil.which", return_value=None)
-    @patch("subprocess.run")
-    def test_apply_fetch_omits_depth_on_full_checkout(self, mock_run, _mock_which):
-        mock_run.side_effect = _make_run_side_effect(
-            branch="dev", verify_ok=True, commit_count="0", shallow=False
-        )
-        self._run_apply_update()
-
-        origin_fetches = self._origin_fetch_cmds(mock_run)
-        assert origin_fetches, "expected git fetch origin"
-        for argv in origin_fetches:
-            assert "--depth" not in argv
-
-    @patch("hermes_cli.config.detect_install_method", return_value="git")
-    @patch("subprocess.run")
-    def test_check_fetch_passes_depth_1_on_shallow_checkout(self, mock_run, _mock_method):
-        def side_effect(cmd, **kwargs):
-            joined = " ".join(str(c) for c in cmd)
-            if "rev-parse" in joined and "--is-shallow-repository" in joined:
-                return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
-            if "fetch" in joined:
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-            if "rev-parse" in joined and "--verify" in joined:
-                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-            if "rev-parse" in joined and "HEAD" in joined:
-                return subprocess.CompletedProcess(cmd, 0, stdout="aaa\n", stderr="")
-            if "rev-parse" in joined and "origin/dev" in joined:
-                return subprocess.CompletedProcess(cmd, 0, stdout="bbb\n", stderr="")
-            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
-
-        mock_run.side_effect = side_effect
-        with patch(
-            "hermes_cli.config.load_config",
-            return_value={"updates": {"branch": "dev"}},
-        ), patch("hermes_cli.banner._github_compare_behind", return_value=1):
-            cmd_update(SimpleNamespace(check=True, branch=None))
-
-        origin_fetches = self._origin_fetch_cmds(mock_run)
-        assert origin_fetches, "expected git fetch origin"
-        for argv in origin_fetches:
-            assert argv[argv.index("--depth") + 1] == "1"
 
 
 class TestCmdUpdateMigrationPrompt:
@@ -957,11 +821,103 @@ class TestCmdUpdateProfileSkillSync:
         assert default_p.path in synced_paths
 
 
+class TestCmdUpdateShallowFetch:
+    """Apply-path fetch must keep shallow installer checkouts at depth 1.
+
+    A bare ``git fetch origin <branch>`` against a shallow local origin fails
+    with ``Could not read <sha>`` / ``did not send all necessary objects``.
+    The --check path already passed ``--depth 1``; the apply path must too.
+    """
+
+    @staticmethod
+    def _origin_fetch_cmds(mock_run):
+        cmds = []
+        for call in mock_run.call_args_list:
+            if not call.args:
+                continue
+            argv = [str(part) for part in call.args[0]]
+            if "fetch" in argv and "origin" in argv:
+                cmds.append(argv)
+        return cmds
+
+    @staticmethod
+    def _run_apply_update():
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"updates": {"branch": "dev"}},
+        ), patch("hermes_cli.main._run_pre_update_backup", return_value=None), patch(
+            "hermes_cli.update_cmd._update_node_dependencies", return_value=[]
+        ), patch(
+            "hermes_cli.update_cmd._repair_node_deps_on_current_checkout"
+        ), patch(
+            "hermes_cli.main._build_web_ui"
+        ):
+            cmd_update(SimpleNamespace(yes=True))
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_apply_fetch_passes_depth_1_on_shallow_checkout(
+        self, mock_run, _mock_which
+    ):
+        mock_run.side_effect = _make_run_side_effect(
+            branch="dev", verify_ok=True, commit_count="0", shallow=True
+        )
+        self._run_apply_update()
+
+        origin_fetches = self._origin_fetch_cmds(mock_run)
+        assert origin_fetches, "expected git fetch origin"
+        for argv in origin_fetches:
+            depth_at = argv.index("--depth")
+            assert argv[depth_at + 1] == "1"
+
+    @patch("shutil.which", return_value=None)
+    @patch("subprocess.run")
+    def test_apply_fetch_omits_depth_on_full_checkout(self, mock_run, _mock_which):
+        mock_run.side_effect = _make_run_side_effect(
+            branch="dev", verify_ok=True, commit_count="0", shallow=False
+        )
+        self._run_apply_update()
+
+        origin_fetches = self._origin_fetch_cmds(mock_run)
+        assert origin_fetches, "expected git fetch origin"
+        for argv in origin_fetches:
+            assert "--depth" not in argv
+
+    @patch("hermes_cli.config.detect_install_method", return_value="git")
+    @patch("subprocess.run")
+    def test_check_fetch_passes_depth_1_on_shallow_checkout(self, mock_run, _mock_method):
+        def side_effect(cmd, **kwargs):
+            joined = " ".join(str(c) for c in cmd)
+            if "rev-parse" in joined and "--is-shallow-repository" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="true\n", stderr="")
+            if "fetch" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if "rev-parse" in joined and "--verify" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+            if "rev-parse" in joined and "HEAD" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="aaa\n", stderr="")
+            if "rev-parse" in joined and "origin/dev" in joined:
+                return subprocess.CompletedProcess(cmd, 0, stdout="bbb\n", stderr="")
+            return subprocess.CompletedProcess(cmd, 0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"updates": {"branch": "dev"}},
+        ), patch("hermes_cli.banner._github_compare_behind", return_value=1):
+            cmd_update(SimpleNamespace(check=True, branch=None))
+
+        origin_fetches = self._origin_fetch_cmds(mock_run)
+        assert origin_fetches, "expected git fetch origin"
+        for argv in origin_fetches:
+            assert argv[argv.index("--depth") + 1] == "1"
+
+
 class TestCmdUpdateBranchFlag:
     """``hermes update --branch <name>`` targets the requested branch.
 
-    A configured branch is the default; --branch lets callers override it
-    without monkey-patching the implementation.
+    The CLI default stays 'main'; --branch lets callers pick a different
+    target without monkey-patching the implementation.
     """
 
     def _branch_side_effect(self, current_branch, target_branch, *, checkout_fails=False, track_fails=False, commit_count="0"):
@@ -1021,25 +977,6 @@ class TestCmdUpdateBranchFlag:
         merge_cmds = [c for c in commands if "merge --ff-only" in c]
         assert any("origin/bb/gui" in c and "origin/main" not in c for c in merge_cmds), merge_cmds
 
-    @patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}})
-    @patch("shutil.which", return_value=None)
-    @patch("subprocess.run")
-    def test_configured_branch_pulls_against_named_branch(
-        self, mock_run, _mock_which, _mock_config, capsys
-    ):
-        """A configured branch drives the apply path when --branch is omitted."""
-        mock_run.side_effect = self._branch_side_effect(
-            current_branch="dev", target_branch="dev", commit_count="3"
-        )
-
-        cmd_update(SimpleNamespace())
-
-        commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
-        rev_list_cmds = [c for c in commands if "rev-list" in c]
-        merge_cmds = [c for c in commands if "merge --ff-only" in c]
-        assert any("origin/dev" in c for c in rev_list_cmds), rev_list_cmds
-        assert any("origin/dev" in c for c in merge_cmds), merge_cmds
-
 
     @patch("shutil.which", return_value=None)
     @patch("subprocess.run")
@@ -1061,35 +998,6 @@ class TestCmdUpdateBranchFlag:
         out = capsys.readouterr().out
         assert "does not exist locally or on origin" in out
         assert "nonexistent" in out
-
-
-class TestResolveUpdateBranch:
-    """Configured update branches are shared by CLI and gateway updates."""
-
-    def test_uses_configured_branch_when_flag_is_omitted(self, tmp_path, monkeypatch):
-        import hermes_cli.config as config_module
-
-        (tmp_path / "config.yaml").write_text("updates:\n  branch: dev\n", encoding="utf-8")
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-        config_module._LOAD_CONFIG_CACHE.clear()
-        config_module._RAW_CONFIG_CACHE.clear()
-        try:
-            assert _resolve_update_branch(SimpleNamespace()) == "dev"
-        finally:
-            config_module._LOAD_CONFIG_CACHE.clear()
-            config_module._RAW_CONFIG_CACHE.clear()
-
-    def test_explicit_branch_overrides_configured_branch(self):
-        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}}):
-            assert _resolve_update_branch(SimpleNamespace(branch="main")) == "main"
-
-    def test_whitespace_flag_uses_configured_branch(self):
-        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}}):
-            assert _resolve_update_branch(SimpleNamespace(branch="   ")) == "dev"
-
-    def test_invalid_configured_branch_falls_back_to_main(self):
-        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "   "}}):
-            assert _resolve_update_branch(SimpleNamespace(branch="")) == "main"
 
 
 class TestCmdUpdateCheckBranchFlag:
@@ -1137,9 +1045,6 @@ class TestCmdUpdateCheckBranchFlag:
                 rc = 0 if verify_ok else 1
                 return subprocess.CompletedProcess(cmd, rc, stdout="", stderr="")
 
-            if "rev-parse" in joined and "--is-shallow-repository" in joined:
-                return subprocess.CompletedProcess(cmd, 0, stdout="false\n", stderr="")
-
             if "rev-list" in joined:
                 return subprocess.CompletedProcess(cmd, 0, stdout=f"{commit_count}\n", stderr="")
 
@@ -1169,26 +1074,6 @@ class TestCmdUpdateCheckBranchFlag:
         rev_list_cmds = [c for c in commands if "rev-list" in c]
         assert any("origin/bb/gui" in c for c in rev_list_cmds), rev_list_cmds
         assert not any("origin/main" in c for c in rev_list_cmds), rev_list_cmds
-
-    @patch("hermes_cli.config.detect_install_method", return_value="git")
-    @patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}})
-    @patch("subprocess.run")
-    def test_check_uses_configured_branch_when_flag_is_omitted(
-        self, mock_run, _mock_config, _mock_method, capsys
-    ):
-        """A configured branch drives --check when --branch is omitted."""
-        mock_run.side_effect = self._check_side_effect(
-            target_branch="dev", verify_ok=True, commit_count="2"
-        )
-
-        cmd_update(SimpleNamespace(check=True, branch=None))
-
-        commands = [" ".join(str(a) for a in c.args[0]) for c in mock_run.call_args_list]
-        assert not any("fetch" in c and "upstream" in c for c in commands), commands
-        verify_cmds = [c for c in commands if "rev-parse" in c and "--verify" in c]
-        rev_list_cmds = [c for c in commands if "rev-list" in c]
-        assert any("origin/dev" in c for c in verify_cmds), verify_cmds
-        assert any("origin/dev" in c for c in rev_list_cmds), rev_list_cmds
 
     @patch("hermes_cli.config.detect_install_method", return_value="git")
     @patch("subprocess.run")
@@ -1243,16 +1128,16 @@ class TestCmdUpdateCheckBranchFlag:
 
 
 class TestCmdUpdateZipBranchRefusal:
-    """Non-main update targets must refuse on the ZIP fallback path.
+    """``hermes update --branch=<non-main>`` must refuse on the ZIP fallback path.
 
     The ZIP fallback hard-codes a GitHub archive URL for main.zip; honoring
-    another branch arbitrarily would require remote-branch existence checks the
+    --branch arbitrarily would require remote-branch existence checks the
     fallback can't easily do. Refusing is the right move — silently lying
     about which branch got installed is the bug --branch was meant to prevent.
     """
 
     def test_zip_fallback_refuses_non_main_branch(self, capsys):
-        from hermes_cli.main import _update_via_zip
+        from hermes_cli.update_cmd import _update_via_zip
 
         args = SimpleNamespace(branch="bb/gui")
         with pytest.raises(SystemExit) as exc_info:
@@ -1262,24 +1147,8 @@ class TestCmdUpdateZipBranchRefusal:
         out = capsys.readouterr().out
         assert "bb/gui" in out
         assert "not supported" in out
-        assert "rerun `hermes update --branch bb/gui`" in out
         # No actual download attempted.
         assert "Downloading latest version" not in out
-
-    def test_zip_fallback_for_configured_branch_shows_main_override(self, capsys):
-        from hermes_cli.main import _update_via_zip
-
-        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}}):
-            with pytest.raises(SystemExit) as exc_info:
-                _update_via_zip(SimpleNamespace(branch=None))
-        assert exc_info.value.code == 1
-
-        out = capsys.readouterr().out
-        assert "Branch 'dev'" in out
-        assert "rerun `hermes update`" in out
-        assert "rerun `hermes update --branch dev`" not in out
-        assert "hermes update --branch main" in out
-        assert "--branch=dev" not in out
 
 
 def test_is_termux_env_true_for_termux_prefix():
@@ -1307,8 +1176,37 @@ termux = ["rich>=14"]
     )
     monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
 
-    assert hm._load_installable_optional_extras(group="all") == ["mcp"]
-    assert hm._load_installable_optional_extras(group="termux-all") == ["termux", "mcp"]
+    assert main_install_repair._load_installable_optional_extras(group="all") == ["mcp"]
+    assert main_install_repair._load_installable_optional_extras(group="termux-all") == ["termux", "mcp"]
+
+
+class TestResolveUpdateBranch:
+    """Configured update branches are shared by CLI and gateway updates."""
+
+    def test_uses_configured_branch_when_flag_is_omitted(self, tmp_path, monkeypatch):
+        import hermes_cli.config as config_module
+
+        (tmp_path / "config.yaml").write_text("updates:\n  branch: dev\n", encoding="utf-8")
+        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
+        config_module._LOAD_CONFIG_CACHE.clear()
+        config_module._RAW_CONFIG_CACHE.clear()
+        try:
+            assert _resolve_update_branch(SimpleNamespace()) == "dev"
+        finally:
+            config_module._LOAD_CONFIG_CACHE.clear()
+            config_module._RAW_CONFIG_CACHE.clear()
+
+    def test_explicit_branch_overrides_configured_branch(self):
+        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}}):
+            assert _resolve_update_branch(SimpleNamespace(branch="main")) == "main"
+
+    def test_whitespace_flag_uses_configured_branch(self):
+        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "dev"}}):
+            assert _resolve_update_branch(SimpleNamespace(branch="   ")) == "dev"
+
+    def test_invalid_configured_branch_falls_back_to_main(self):
+        with patch("hermes_cli.config.load_config", return_value={"updates": {"branch": "   "}}):
+            assert _resolve_update_branch(SimpleNamespace(branch="")) == "main"
 
 
 class TestNodeRuntimeNpmResolution:
@@ -1335,9 +1233,9 @@ class TestNodeRuntimeNpmResolution:
         )
 
         with patch(
-            "tools.browser_tool.warm_agent_browser_npx_cache", return_value=True
+            "tools.browser_tool_install.warm_agent_browser_npx_cache", return_value=True
         ):
-            failed = hm._update_node_dependencies()
+            failed = update_cmd._update_node_dependencies()
         assert failed == ["ui-tui, web workspaces"]
         out = capsys.readouterr().out
         assert "mixed state" in out
@@ -1363,11 +1261,11 @@ class TestNodeRuntimeNpmResolution:
         monkeypatch.setenv("PATH", "/mnt/c/Program Files/nodejs")
 
         with patch("subprocess.run") as mock_run, \
-             patch.object(hm, "_web_ui_build_needed", return_value=True), \
+             patch.object(main_web_build, "_web_ui_build_needed", return_value=True), \
              patch.object(hm, "_desktop_packaged_executable", return_value=None), \
              patch.object(hm, "_desktop_dist_exists", return_value=True), \
              patch.object(hm, "_run_npm_install_deterministic") as mock_npm_install, \
-             patch.object(hm, "_run_with_idle_timeout") as mock_idle_build, \
+             patch.object(main_web_build, "_run_with_idle_timeout") as mock_idle_build, \
              patch.object(hm, "_run_logged_subprocess") as mock_desktop_build:
             mock_run.side_effect = _make_run_side_effect(
                 branch="main", verify_ok=True, commit_count="1"
@@ -1537,7 +1435,7 @@ class TestUpdateNodeDependencies:
         """The npx cache warm-up is covered by its own dedicated test below;
         stub it out everywhere else so it doesn't add a spurious npm/npx
         call to the workspace-install assertions in this class."""
-        with patch("tools.browser_tool.warm_agent_browser_npx_cache", return_value=True):
+        with patch("tools.browser_tool_install.warm_agent_browser_npx_cache", return_value=True):
             yield
 
     def _npm_calls(self, mock_run):
@@ -1589,7 +1487,7 @@ class TestUpdateNodeDependencies:
         popen_calls = []
         mock_popen.side_effect = self._make_popen(popen_calls)
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         calls = self._popen_npm_calls(popen_calls)
         assert len(calls) == 1, f"expected exactly 1 npm call, got: {calls}"
@@ -1626,7 +1524,7 @@ class TestUpdateNodeDependencies:
         popen_calls = []
         mock_popen.side_effect = self._make_popen(popen_calls)
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         calls = self._popen_npm_calls(popen_calls)
         assert len(calls) == 1
@@ -1647,7 +1545,7 @@ class TestUpdateNodeDependencies:
         popen_calls = []
         mock_popen.side_effect = self._make_popen(popen_calls)
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         calls = self._popen_npm_calls(popen_calls)
         assert len(calls) == 1
@@ -1666,7 +1564,7 @@ class TestUpdateNodeDependencies:
         monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
         monkeypatch.setattr(hm, "_npm_lockfile_changed", lambda root: False)
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         assert not self._npm_calls(mock_run), (
             "npm must not run when _npm_lockfile_changed reports no change"
@@ -1685,7 +1583,7 @@ class TestUpdateNodeDependencies:
         popen_calls = []
         mock_popen.side_effect = self._make_popen(popen_calls)
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         calls = self._popen_npm_calls(popen_calls)
         assert len(calls) == 1, f"expected npm to run when lockfile changed; got: {calls}"
@@ -1702,10 +1600,13 @@ class TestUpdateNodeDependencies:
         monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
         monkeypatch.setattr(hm, "_npm_lockfile_changed", lambda root: True)
         recorded = []
-        monkeypatch.setattr(hm, "_record_npm_lockfile_hash", lambda root: recorded.append(root))
+        # _update_node_dependencies lives in update_cmd_deps and calls its own module-level
+        # _record_npm_lockfile_hash, so that binding is the real seam (update_cmd's is dead).
+        from hermes_cli import update_cmd_deps
+        monkeypatch.setattr(update_cmd_deps, "_record_npm_lockfile_hash", lambda root: recorded.append(root))
         mock_popen.side_effect = self._make_popen([], returncode=1, stderr_lines=["npm ERR!\n"])
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         assert not recorded, "lockfile hash must not be recorded when npm install fails"
 
@@ -1725,9 +1626,9 @@ class TestUpdateNodeDependencies:
         mock_popen.side_effect = self._make_popen([], returncode=1, stderr_lines=["npm ERR!\n"])
 
         with patch(
-            "tools.browser_tool.warm_agent_browser_npx_cache", return_value=True
+            "tools.browser_tool_install.warm_agent_browser_npx_cache", return_value=True
         ) as mock_warm:
-            hm._update_node_dependencies()
+            update_cmd._update_node_dependencies()
 
         mock_warm.assert_called_once()
 
@@ -1740,7 +1641,7 @@ class TestUpdateNodeDependencies:
         (tmp_path / "package.json").write_text("{}")
         monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         mock_run.assert_not_called()
 
@@ -1752,7 +1653,7 @@ class TestUpdateNodeDependencies:
 
         monkeypatch.setattr(hm, "PROJECT_ROOT", tmp_path)
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         mock_run.assert_not_called()
 
@@ -1769,7 +1670,7 @@ class TestUpdateNodeDependencies:
         popen_calls = []
         mock_popen.side_effect = self._make_popen(popen_calls)
 
-        hm._update_node_dependencies()
+        update_cmd._update_node_dependencies()
 
         cwd_calls = [
             c["kwargs"].get("cwd")

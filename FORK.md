@@ -23,6 +23,40 @@ fork only if a change needs a discussion thread.
 
 ---
 
+## 2026-09-04 — `main` → `dev` after upstream #102117 (facade + siblings)
+
+- **Status:** active (fork-local merge note).
+- **Summary:** upstream
+  [#102117](https://github.com/NousResearch/hermes-agent/pull/102117) split the
+  god files into facades plus `<stem>_<topic>.py` siblings. This merge takes
+  **main's structure** and re-applies fork behavior onto the new homes. Do not
+  restore dest's 1744-line `AGENTS.md` dump; the root file stays the ~424-line
+  upstream split plus the Fork-local pointer below. In-tree code must import
+  defining modules, not PLUGIN-COMPAT / `COMPAT_MANIFEST.md` shims.
+- **Files:** remap of fork hotspots after the split:
+  sticky/tier retry → `agent/turn_api_error.py`,
+  `agent/turn_recovery.py`;
+  logical-request accept (history-mutating continue / success only) →
+  `agent/turn_tool_validation.py`, `agent/turn_empty_response.py`,
+  `agent/turn_final_response.py`, `agent/turn_truncation.py`;
+  native audio attach →
+  `agent/vision_message_prep.py`, `gateway/run_inbound.py`,
+  `gateway/run_turn_runner.py`; persist strip → `agent/turn_finalizer.py`;
+  TUI usage RPC → `tui_gateway/methods_session.py`; update helpers stay on
+  `hermes_cli/update_cmd.py` (`_resolve_update_branch` on
+  `hermes_cli/main_install_repair.py`); delegate override lives in
+  `tools/delegate_tool.py` + `tools/delegate_tool_config.py`.
+- **Upstream disposition:** #102117 is on `upstream/main`. Fork features remain
+  fork-local (see entries below).
+- **Merge risk:** taking dest's god files would undo the refactor. After this
+  merge re-run the fork suite listed in the 2026-09-01 / 2026-08-31 / audio /
+  delegate / update entries (paths below still apply, with the remaps in
+  **Files**).
+- **Known limitations (accepted):** MerchantBench OpenRouter identity headers
+  stay in `merchantbench_adapter/runtime.py`, not `run_agent.py`.
+
+---
+
 ## 2026-09-01 — Sticky provider order: Hermes-side pin + cyclic rotation on provider failure
 
 - **Status:** active (fork-local).
@@ -88,10 +122,10 @@ fork only if a change needs a discussion thread.
   OpenRouter profile's `build_extra_body`) but explicitly disables it under
   a manual `provider.order`; upstream issue #24493 / PR #24495 cover only
   the per-model schema, not client-side pinning.
-- **Merge risk:** `agent/conversation_loop.py` is high-churn — the three
-  hook sites (retry budget at loop start, rotate after
-  `classify_api_error`, transport-fallback gate) must survive weekly
-  `main` merges; re-run `tests/agent/test_sticky_provider_order.py` and
+- **Merge risk:** post-#102117 the rotate-after-`classify_api_error` hook
+  lives in `agent/turn_api_error.py`; retry-budget / fallback gates remain
+  in `agent/conversation_loop.py`. Re-run
+  `tests/agent/test_sticky_provider_order.py` and
   `tests/run_agent/test_provider_parity.py` after each merge.
 - **Known limitations (accepted):** rotation on a non-retryable timeout
   (stale circuit breaker) shifts the pin without a retry of that request —
@@ -246,16 +280,17 @@ fork only if a change needs a discussion thread.
   next to `replace_audio_parts_with_placeholder`, matching the image
   helper. A stale-watchdog-shaped abort retries; a real audio 4xx still
   strips `input_audio` and retries text-only.
-- **Files:** `agent/conversation_loop.py`, `agent/audio_routing.py`,
-  `tests/agent/test_audio_routing.py`,
+- **Files:** `agent/turn_recovery.py` (audio 4xx strip+retry),
+  `agent/audio_routing.py`, `tests/agent/test_audio_routing.py`,
   `tests/run_agent/test_audio_rejection_fallback.py`.
 - **Upstream disposition:** **no-request-found.** This recovery exists
   only because native audio is fork-local (2026-08-14 entry). Upstream
   `main` has no `_AUDIO_REJECTION_PHRASES` block.
   [#98419](https://github.com/NousResearch/hermes-agent/pull/98419) is
   Telegram STT echo HTML quotes — different code, no update needed.
-- **Merge risk:** `conversation_loop.py` is high-churn. After each weekly
-  merge re-run `tests/run_agent/test_audio_rejection_fallback.py` and
+- **Merge risk:** `agent/turn_recovery.py` is the post-#102117 home of the
+  generic API `except`. After each weekly merge re-run
+  `tests/run_agent/test_audio_rejection_fallback.py` and
   `tests/agent/test_audio_routing.py`.
 - **Known limitations (accepted):** phrase matching is English-only
   (same as image rejection); a translated 4xx still uses the normal
@@ -328,7 +363,8 @@ fork only if a change needs a discussion thread.
   inherit. Parent runtime state is snapshot-tested unchanged on
   success/error/timeout paths (guard against upstream bug
   [#62665](https://github.com/NousResearch/hermes-agent/issues/62665)).
-- **Files:** `tools/delegate_tool.py`, `tools/async_delegation.py`,
+- **Files:** `tools/delegate_tool.py`, `tools/delegate_tool_config.py`,
+  `tools/async_delegation.py`,
   `tools/process_registry.py`, `hermes_cli/models.py` (`_routing_variant_catalog_base`),
   `run_agent.py` (+1 line), `hermes_cli/config_defaults.py`,
   `tests/tools/test_delegate_model_override.py`,
@@ -421,9 +457,11 @@ fork only if a change needs a discussion thread.
   full bundle (queries: `audio_analyze`, `audio_input_mode`, `native audio`,
   `audio_routing`). If #90206 or #27412 land, rebase onto that shape
   rather than keeping a third routing module.
-- **Merge risk:** `gateway/run.py`, `run_agent.py`, `toolsets.py`, and
-  `image_routing.py` are high-churn. `audio_routing.py` / `audio_tools.py`
-  are fork-only until upstream adds the same path. After each weekly merge
+- **Merge risk:** `gateway/run_inbound.py`, `gateway/run_turn_runner.py`,
+  `agent/vision_message_prep.py`, `agent/turn_finalizer.py`, `toolsets.py`,
+  and `image_routing.py` (`_supports_capability_override`) are high-churn.
+  `audio_routing.py` / `audio_tools.py` are fork-only until upstream adds
+  the same path. After each weekly merge
   re-run `tests/agent/test_audio_routing.py`,
   `tests/run_agent/test_audio_rejection_fallback.py`,
   `tests/tools/test_audio_analyze.py`, and
@@ -589,8 +627,8 @@ fork only if a change needs a discussion thread.
   comment calls the plain `🎙️ "…"` echo noisy; that is the UX this
   wrapping addresses, but upstream asked for a kill-switch, not a
   collapsed quote.
-- **Merge risk:** `gateway/run.py` echo sites (immediate + pending) and
-  `plugins/platforms/telegram/adapter.py` `send()` / HTML path are
+- **Merge risk:** `gateway/run_inbound.py` echo sites (immediate + pending)
+  and `plugins/platforms/telegram/adapter.py` `send()` / HTML path are
   high-churn. `gateway/stt_echo.py` is fork-only — conflict only if
   upstream adds the same path. After each weekly merge re-run
   `tests/gateway/test_stt_echo_format.py`,

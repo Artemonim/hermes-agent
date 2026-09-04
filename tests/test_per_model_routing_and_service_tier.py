@@ -10,6 +10,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
+import run_agent
 import yaml
 
 from hermes_constants import (
@@ -112,7 +113,7 @@ class TestCliAgentConstruction:
             captured.update(kwargs)
             return SimpleNamespace(**kwargs)
 
-        monkeypatch.setattr(cli_mod, "AIAgent", _fake_agent)
+        monkeypatch.setattr(run_agent, "AIAgent", _fake_agent)
         shell = cli_mod.HermesCLI(model=_MATCH_MODEL, compact=True, max_turns=1)
         shell._session_db = object()
         shell._resumed = False
@@ -146,7 +147,7 @@ class TestCliAgentConstruction:
             captured.update(kwargs)
             return SimpleNamespace(**kwargs)
 
-        monkeypatch.setattr(cli_mod, "AIAgent", _fake_agent)
+        monkeypatch.setattr(run_agent, "AIAgent", _fake_agent)
         shell = cli_mod.HermesCLI(model=_OTHER_MODEL, compact=True, max_turns=1)
         shell._session_db = object()
         shell._resumed = False
@@ -162,6 +163,39 @@ class TestCliAgentConstruction:
         assert shell._init_agent() is True
         assert captured["providers_allowed"] == ["foo"]
         assert captured["service_tier"] == "priority"
+
+
+    def test_session_fast_pin_copied_onto_agent(self, monkeypatch):
+        _write_config()
+        import cli as cli_mod
+
+        monkeypatch.setattr(cli_mod, "_hermes_home", get_hermes_home())
+        monkeypatch.setattr(cli_mod, "CLI_CONFIG", cli_mod.load_cli_config())
+
+        def _fake_agent(*_a, **kwargs):
+            ns = SimpleNamespace(**kwargs)
+            ns._config_managed_routing_tier = False
+            ns._service_tier_session_pinned = False
+            return ns
+
+        monkeypatch.setattr(run_agent, "AIAgent", _fake_agent)
+        shell = cli_mod.HermesCLI(model=_MATCH_MODEL, compact=True, max_turns=1)
+        shell._session_db = object()
+        shell._resumed = False
+        shell.conversation_history = []
+        shell._install_tool_callbacks = lambda: None
+        shell._ensure_tirith_security = lambda: None
+        shell._ensure_runtime_credentials = lambda: True
+        shell._service_tier_session_pinned = True
+        shell.service_tier = "flex"
+        from hermes_cli import mcp_startup
+
+        monkeypatch.setattr(
+            mcp_startup, "ensure_mcp_discovery_before_agent_build", lambda **_k: None
+        )
+        assert shell._init_agent() is True
+        assert shell.agent._service_tier_session_pinned is True
+        assert shell.agent._config_managed_routing_tier is True
 
 
 class TestGatewaySessionResolve:
@@ -207,6 +241,53 @@ class TestGatewaySessionResolve:
             )
             is None
         )
+
+    def test_wire_callbacks_copy_session_pin_onto_reused_agent(self):
+        from gateway.config import Platform
+        from gateway.run_turn_runner import TurnRunner
+        from gateway.session import SessionSource
+        from gateway.session_state import SERVICE_TIER_UNSET
+        from gateway.turn_context import TurnContext
+
+        def _wire(override):
+            runner = SimpleNamespace(
+                _service_tier="flex",
+                _provider_routing={},
+                _service_tier_escalation={"enabled": False},
+                _peek_session_state=lambda _key: SimpleNamespace(
+                    conversation=SimpleNamespace(service_tier_override=override)
+                ),
+                _consume_pending_turn_sidecar_notes=lambda _key: [],
+                _is_telegram_topic_lane=lambda _src: False,
+                _is_discord_auto_thread_lane=lambda _src: False,
+                _is_relay_discord_channel_lane=lambda _src: False,
+                config=SimpleNamespace(multiplex_profiles=False),
+            )
+            ctx = TurnContext(
+                source=SessionSource(
+                    platform=Platform.TELEGRAM, chat_id="c", user_id="u",
+                ),
+                session_key="sess",
+                user_config={},
+                _hooks_ref=SimpleNamespace(loaded_hooks=False),
+                agent_holder=[None],
+            )
+            agent = SimpleNamespace(
+                request_overrides={},
+                tools=[],
+                _service_tier_session_pinned=False,
+                _config_managed_routing_tier=False,
+            )
+            TurnRunner(runner, ctx)._wire_turn_agent_callbacks(
+                agent, {"model": "m"}, None, None, None, False,
+            )
+            return agent
+
+        pinned = _wire("flex")
+        assert pinned._service_tier_session_pinned is True
+        assert pinned._config_managed_routing_tier is True
+        unpinned = _wire(SERVICE_TIER_UNSET)
+        assert unpinned._service_tier_session_pinned is False
 
     def test_session_routing_uses_effective_model(self):
         import gateway.run as gateway_run
@@ -1260,6 +1341,7 @@ class TestFallbackRebaseInRunConversation:
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),
             patch("run_agent.OpenAI", return_value=MagicMock()),
+            patch("agent.process_bootstrap.OpenAI", return_value=MagicMock()),
             patch("agent.agent_runtime_helpers.time.sleep"),
             patch("agent.conversation_loop.time.sleep"),
             patch(

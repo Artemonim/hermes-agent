@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from unittest.mock import patch
 
@@ -378,12 +379,31 @@ class TestExtractImageRefs:
         assert urls == []
 
     def test_finds_home_relative_path(self, tmp_path: Path, monkeypatch):
-        # Simulate ~/foo.png by pointing HOME at tmp_path and creating the file
+        # Simulate ~/foo.png. Windows expanduser prefers USERPROFILE over HOME.
         monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))
         img = tmp_path / "foo.png"
         img.write_bytes(_png_bytes())
         paths, urls = extract_image_refs("see ~/foo.png please")
         assert paths == [str(img)]
+        assert urls == []
+
+
+    def test_finds_windows_drive_letter_path(self, tmp_path: Path, monkeypatch):
+        """Regex must match ``G:\\...`` even when the host is not Windows."""
+        img = tmp_path / "shot.png"
+        img.write_bytes(_png_bytes())
+        resolved = os.path.normpath(str(img))
+
+        def _fake_existing(candidate: str):
+            normalized = candidate.replace("/", "\\")
+            if ":" in candidate and normalized.lower().endswith("\\shot.png"):
+                return resolved
+            return None
+
+        monkeypatch.setattr("agent.image_routing._existing_file", _fake_existing)
+        paths, urls = extract_image_refs(r"Look at G:\photos\shot.png please")
+        assert paths == [resolved]
         assert urls == []
 
 

@@ -21,7 +21,7 @@ from gateway.turn_context import TurnContext
 
 
 def _make_runner(ctx):
-    from gateway.run import TurnRunner
+    from gateway.run_turn_runner import TurnRunner
 
     class _StubGatewayRunner:
         def _adapter_for_source(self, source):
@@ -51,7 +51,7 @@ class TestTurnContext:
 
 class TestTurnRunner:
     def test_methods_exist_and_bind(self):
-        from gateway.run import TurnRunner
+        from gateway.run_turn_runner import TurnRunner
 
         ctx = TurnContext()
         runner = _make_runner(ctx)
@@ -114,6 +114,8 @@ class TestTurnRunner:
         gateway_runner._extract_cache_busting_config.return_value = {}
         gateway_runner._refresh_fallback_model.return_value = None
         gateway_runner._consume_pending_native_image_paths.return_value = []
+        gateway_runner._consume_pending_native_audio_paths.return_value = []
+        gateway_runner._consume_pending_native_video_frame_paths.return_value = []
         gateway_runner._consume_pending_turn_sidecar_notes.return_value = []
         gateway_runner._is_telegram_topic_lane.return_value = False
         gateway_runner._is_discord_auto_thread_lane.return_value = False
@@ -137,7 +139,7 @@ class TestTurnRunner:
             _hooks_ref=SimpleNamespace(loaded_hooks=False),
         )
 
-        from gateway.run import TurnRunner
+        from gateway.run_turn_runner import TurnRunner
 
         result = TurnRunner(gateway_runner, ctx).run_sync()
 
