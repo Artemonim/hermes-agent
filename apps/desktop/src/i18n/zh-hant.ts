@@ -2623,7 +2623,32 @@ export const zhHant = defineLocale({
         unavailable: '無法使用',
         updated: time => `更新於 ${time}`,
         updatedUnknown: '無法取得更新時間',
-        used: used => `已用 ${used}%`
+        used: used => `已用 ${used}%`,
+        apiKeyUsage: 'API 金鑰用量',
+        bankedResets: count => `已儲存 ${count} 次重設額度，使用 /usage reset 即可啟用`,
+        creditsBalance: '額度餘額',
+        creditsUnlimited: '無限制',
+        extraUsage: '額外用量',
+        extraUsageValue: (used, limit) => `${used} / ${limit}`,
+        ofLimitRemaining: (remaining, limit) => `剩餘 ${remaining} / ${limit}`,
+        resetIntervals: {
+          daily: '每日重設',
+          monthly: '每月重設',
+          weekly: '每週重設'
+        },
+        usageThisMonth: value => `本月 ${value}`,
+        usageThisWeek: value => `本週 ${value}`,
+        usageToday: value => `今日 ${value}`,
+        usageTotal: value => `共 ${value}`,
+        windowLabels: {
+          api_key_quota: 'API 金鑰配額',
+          current_session: '目前工作階段',
+          current_week: '本週',
+          opus_week: 'Opus 本週',
+          session: '工作階段',
+          sonnet_week: 'Sonnet 本週',
+          weekly: '每週'
+        }
       },
       contextUsage: '上下文使用量',
       systemResources: {

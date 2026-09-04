@@ -3112,7 +3112,33 @@ export const en: Translations = {
         unavailable: 'Unavailable',
         updated: time => `Updated ${time}`,
         updatedUnknown: 'Updated time unknown',
-        used: used => `${used}% used`
+        used: used => `${used}% used`,
+        apiKeyUsage: 'API key usage',
+        bankedResets: count =>
+          `You have ${count} reset${count === 1 ? '' : 's'} banked - use /usage reset to activate`,
+        creditsBalance: 'Credits balance',
+        creditsUnlimited: 'Unlimited',
+        extraUsage: 'Extra usage',
+        extraUsageValue: (used, limit) => `${used} / ${limit}`,
+        ofLimitRemaining: (remaining, limit) => `${remaining} of ${limit} remaining`,
+        resetIntervals: {
+          daily: 'resets daily',
+          monthly: 'resets monthly',
+          weekly: 'resets weekly'
+        },
+        usageThisMonth: value => `${value} this month`,
+        usageThisWeek: value => `${value} this week`,
+        usageToday: value => `${value} today`,
+        usageTotal: value => `${value} total`,
+        windowLabels: {
+          api_key_quota: 'API key quota',
+          current_session: 'Current session',
+          current_week: 'Current week',
+          opus_week: 'Opus week',
+          session: 'Session',
+          sonnet_week: 'Sonnet week',
+          weekly: 'Weekly'
+        }
       },
       contextUsage: 'Context usage',
       systemResources: {

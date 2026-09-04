@@ -11,6 +11,7 @@ import type { AccountUsageResponse, AccountUsageSnapshot, UsageStats } from '@/t
 import {
   accountUsageMinRemaining,
   accountUsageRemaining,
+  formatCreditsBalance,
   tightestAccountUsageWindow,
   useAccountUsageStatusbarItem
 } from './account-usage-statusbar-item'
@@ -351,5 +352,172 @@ describe('Account usage statusbar item', () => {
     await waitFor(() => expect(requestGateway).toHaveBeenCalled())
 
     expect(screen.queryByRole('button', { name: /Codex|Account usage/i })).toBeNull()
+  })
+
+  it('renders localized structured rows instead of raw details', async () => {
+    const snapshot: AccountUsageSnapshot = {
+      available: true,
+      credits_balance: 31.44,
+      details: [
+        'Credits balance: $31.44',
+        'API key usage: $14.25 total · $4.09 this week · $0.44 this month'
+      ],
+      details_structured: true,
+      fetched_at: '2026-07-16T01:02:03+00:00',
+      plan: 'Plus',
+      provider: 'openrouter',
+      rows: [
+        { args: { currency: 'USD', value: 31.44 }, key: 'credits_balance' },
+        { args: { monthly: 0.44, total: 14.25, weekly: 4.09 }, key: 'api_key_usage' },
+        { args: { foo: 1 }, key: 'future_metric' }
+      ],
+      source: 'usage_api',
+      title: 'Account limits',
+      unavailable_reason: null,
+      windows: [
+        {
+          label: 'API key quota',
+          label_key: 'api_key_quota',
+          limit: 14.25,
+          limit_remaining: 4.09,
+          reset_interval: 'weekly',
+          used_percent: 71
+        }
+      ]
+    }
+
+    renderHarness({
+      provider: 'openrouter',
+      requestGateway: requester(async () => ({ account_usage: snapshot, status: 'ok' }))
+    })
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /OpenRouter: \$31\.44 \(29%\)/ }), { button: 0 })
+
+    const creditsLabel = await screen.findByText('Credits balance')
+    expect(creditsLabel.tagName).toBe('P')
+    expect(creditsLabel.nextElementSibling?.textContent).toBe('$31.44')
+    expect(creditsLabel.textContent).toBe('Credits balance')
+
+    const usageLabel = screen.getByText('API key usage')
+    const usageValue = usageLabel.nextElementSibling
+    expect(usageValue?.textContent).toBe('$14.25 total · $4.09 this week · $0.44 this month')
+    expect(usageValue?.className.split(/\s+/)).toContain('break-words')
+    expect(usageValue?.className.split(/\s+/)).not.toContain('truncate')
+    expect(screen.getByText('API key quota')).toBeTruthy()
+    expect(screen.getByText('$4.09 of $14.25 remaining · resets weekly')).toBeTruthy()
+    expect(screen.queryByText('Credits balance: $31.44')).toBeNull()
+    expect(screen.queryByText(/API key usage: \$14\.25/)).toBeNull()
+  })
+
+  it('falls back to truncated raw details when details_structured is absent', async () => {
+    renderHarness({
+      requestGateway: requester(async () => ({
+        account_usage: {
+          ...windowsSnapshot,
+          rows: [{ args: { currency: 'USD', value: 12.5 }, key: 'credits_balance' }]
+        },
+        status: 'ok'
+      }))
+    })
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /Codex: 41% left/i }), { button: 0 })
+
+    const rawDetail = await screen.findByText('Credits balance: $12.50')
+    expect(rawDetail.tagName).toBe('LI')
+    expect(rawDetail.className.split(/\s+/)).toContain('truncate')
+    expect(screen.queryByText('Credits balance')).toBeNull()
+    expect(screen.queryByText('API key usage')).toBeNull()
+  })
+
+  it('uses a localized window label for known label_key and the raw label otherwise', async () => {
+    renderHarness({
+      requestGateway: requester(async () => ({
+        account_usage: {
+          ...windowsSnapshot,
+          details: [],
+          windows: [
+            { label: 'Session', label_key: 'current_session', reset_at: '2026-07-16T03:02:03+00:00', used_percent: 10 },
+            { label: 'Daily burst', label_key: 'daily_burst', reset_at: '2026-07-20T03:02:03+00:00', used_percent: 20 }
+          ]
+        },
+        status: 'ok'
+      }))
+    })
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /Codex: 80% left/i }), { button: 0 })
+
+    expect(await screen.findByText('Current session')).toBeTruthy()
+    expect(screen.getByText('Daily burst')).toBeTruthy()
+    expect(screen.queryByText('Session')).toBeNull()
+  })
+
+  it('omits the resets phrase for an unknown reset_interval without throwing', async () => {
+    renderHarness({
+      provider: 'openrouter',
+      requestGateway: requester(async () => ({
+        account_usage: {
+          ...windowsSnapshot,
+          credits_balance: 31.44,
+          details: [],
+          provider: 'openrouter',
+          windows: [
+            {
+              label: 'API key quota',
+              label_key: 'api_key_quota',
+              limit: 100,
+              limit_remaining: 70,
+              reset_interval: 'hourly',
+              used_percent: 30
+            }
+          ]
+        },
+        status: 'ok'
+      }))
+    })
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /OpenRouter: \$31\.44 \(70%\)/ }), { button: 0 })
+
+    expect(await screen.findByText('$70.00 of $100.00 remaining')).toBeTruthy()
+    expect(screen.queryByText(/resets /)).toBeNull()
+  })
+
+  it('renders credits_unlimited, banked_resets, and extra_usage rows', async () => {
+    renderHarness({
+      requestGateway: requester(async () => ({
+        account_usage: {
+          ...windowsSnapshot,
+          details: [
+            'Credits balance: unlimited',
+            'You have 2 resets banked - use /usage reset to activate',
+            'Extra usage: 1.50 / 10.00 USD'
+          ],
+          details_structured: true,
+          rows: [
+            { key: 'credits_unlimited' },
+            { args: { count: 2 }, key: 'banked_resets' },
+            { args: { currency: 'USD', limit: 10, used: 1.5 }, key: 'extra_usage' }
+          ],
+          windows: [{ label: 'Session', reset_at: '2026-07-16T03:02:03+00:00', used_percent: 10 }]
+        },
+        status: 'ok'
+      }))
+    })
+
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /Codex: 90% left/i }), { button: 0 })
+
+    const creditsLabel = await screen.findByText('Credits balance')
+    expect(creditsLabel.nextElementSibling?.textContent).toBe('Unlimited')
+    expect(screen.getByText('You have 2 resets banked - use /usage reset to activate')).toBeTruthy()
+    const extraLabel = screen.getByText('Extra usage')
+    expect(extraLabel.nextElementSibling?.textContent).toBe('$1.50 / $10.00')
+    expect(screen.queryByText('Credits balance: unlimited')).toBeNull()
+  })
+})
+
+describe('formatCreditsBalance', () => {
+  it('formats USD by default and falls back for unknown currency codes', () => {
+    expect(formatCreditsBalance(31.44, 'en')).toBe('$31.44')
+    expect(formatCreditsBalance(12.5, 'en', 'USD')).toBe('$12.50')
+    expect(formatCreditsBalance(12.5, 'en', 'USDX')).toBe('12.50 USDX')
   })
 })

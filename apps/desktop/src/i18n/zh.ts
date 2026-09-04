@@ -3261,7 +3261,32 @@ export const zh: Translations = {
         unavailable: '不可用',
         updated: time => `更新于 ${time}`,
         updatedUnknown: '更新时间未知',
-        used: used => `已用 ${used}%`
+        used: used => `已用 ${used}%`,
+        apiKeyUsage: 'API 密钥用量',
+        bankedResets: count => `已储存 ${count} 次重置额度，使用 /usage reset 即可启用`,
+        creditsBalance: '额度余额',
+        creditsUnlimited: '无限制',
+        extraUsage: '额外用量',
+        extraUsageValue: (used, limit) => `${used} / ${limit}`,
+        ofLimitRemaining: (remaining, limit) => `剩余 ${remaining} / ${limit}`,
+        resetIntervals: {
+          daily: '每日重置',
+          monthly: '每月重置',
+          weekly: '每周重置'
+        },
+        usageThisMonth: value => `本月 ${value}`,
+        usageThisWeek: value => `本周 ${value}`,
+        usageToday: value => `今日 ${value}`,
+        usageTotal: value => `共 ${value}`,
+        windowLabels: {
+          api_key_quota: 'API 密钥配额',
+          current_session: '当前会话',
+          current_week: '本周',
+          opus_week: 'Opus 本周',
+          session: '会话',
+          sonnet_week: 'Sonnet 本周',
+          weekly: '每周'
+        }
       },
       contextUsage: '上下文用量',
       systemResources: {
