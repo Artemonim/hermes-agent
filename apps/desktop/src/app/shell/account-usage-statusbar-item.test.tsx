@@ -9,8 +9,10 @@ import { I18nProvider } from '@/i18n'
 import type { AccountUsageResponse, AccountUsageSnapshot, UsageStats } from '@/types/hermes'
 
 import {
+  accountUsageChipLabel,
   accountUsageMinRemaining,
   accountUsageRemaining,
+  formatCompactQuotaRatio,
   formatCreditsBalance,
   tightestAccountUsageWindow,
   useAccountUsageStatusbarItem
@@ -131,6 +133,30 @@ describe('Account usage statusbar item', () => {
     renderHarness({ provider: 'openrouter', requestGateway })
 
     expect(await screen.findByRole('button', { name: /OpenRouter: \$31\.44 \(100%\)/ })).toBeTruthy()
+  })
+
+  it('formats credits plus rounded key quota as Name: $amount ($remaining/$limit, remaining%)', async () => {
+    const requestGateway = requester(async () => ({
+      account_usage: {
+        ...windowsSnapshot,
+        credits_balance: 46.07,
+        provider: 'openrouter',
+        windows: [
+          {
+            label: 'API key quota',
+            label_key: 'api_key_quota',
+            limit: 20,
+            limit_remaining: 19.29,
+            used_percent: ((20 - 19.29) / 20) * 100
+          }
+        ]
+      },
+      status: 'ok'
+    }))
+
+    renderHarness({ provider: 'openrouter', requestGateway })
+
+    expect(await screen.findByRole('button', { name: /OpenRouter: \$46\.07 \(\$19\/20, 96%\)/ })).toBeTruthy()
   })
 
   it('formats windows-only remaining as Name: N% left', async () => {
@@ -391,7 +417,7 @@ describe('Account usage statusbar item', () => {
       requestGateway: requester(async () => ({ account_usage: snapshot, status: 'ok' }))
     })
 
-    fireEvent.pointerDown(await screen.findByRole('button', { name: /OpenRouter: \$31\.44 \(29%\)/ }), { button: 0 })
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /OpenRouter: \$31\.44 \(\$4\/14, 29%\)/ }), { button: 0 })
 
     const creditsLabel = await screen.findByText('Credits balance')
     expect(creditsLabel.tagName).toBe('P')
@@ -475,7 +501,7 @@ describe('Account usage statusbar item', () => {
       }))
     })
 
-    fireEvent.pointerDown(await screen.findByRole('button', { name: /OpenRouter: \$31\.44 \(70%\)/ }), { button: 0 })
+    fireEvent.pointerDown(await screen.findByRole('button', { name: /OpenRouter: \$31\.44 \(\$70\/100, 70%\)/ }), { button: 0 })
 
     expect(await screen.findByText('$70.00 of $100.00 remaining')).toBeTruthy()
     expect(screen.queryByText(/resets /)).toBeNull()
@@ -519,5 +545,67 @@ describe('formatCreditsBalance', () => {
     expect(formatCreditsBalance(31.44, 'en')).toBe('$31.44')
     expect(formatCreditsBalance(12.5, 'en', 'USD')).toBe('$12.50')
     expect(formatCreditsBalance(12.5, 'en', 'USDX')).toBe('12.50 USDX')
+  })
+})
+
+describe('formatCompactQuotaRatio', () => {
+  it('rounds remaining and limit to nearest integers', () => {
+    expect(formatCompactQuotaRatio(19.29, 20)).toBe('$19/20')
+    expect(formatCompactQuotaRatio(19.5, 20)).toBe('$20/20')
+    expect(formatCompactQuotaRatio(0.4, 20)).toBe('$0/20')
+  })
+
+  it('omits a ratio when the rounded limit is not a positive dollar amount', () => {
+    expect(formatCompactQuotaRatio(5, 0.4)).toBeNull()
+    expect(formatCompactQuotaRatio(1, 0)).toBeNull()
+    expect(formatCompactQuotaRatio(Number.NaN, 20)).toBeNull()
+    expect(formatCompactQuotaRatio(19, undefined)).toBeNull()
+  })
+
+  it('clamps a rounded remaining that would exceed the rounded limit', () => {
+    expect(formatCompactQuotaRatio(19.6, 19.4)).toBe('$19/19')
+  })
+})
+
+describe('accountUsageChipLabel', () => {
+  const copy = {
+    accountUsage: 'Account usage',
+    accountUsageLeft: (remaining: number) => `${remaining}% left`
+  }
+
+  it('puts rounded key quota ahead of remaining percent when both exist', () => {
+    expect(
+      accountUsageChipLabel({
+        copy,
+        credits: '$46.07',
+        providerName: 'OpenRouter',
+        quotaRatio: '$19/20',
+        remaining: 96
+      })
+    ).toBe('OpenRouter: $46.07 ($19/20, 96%)')
+  })
+
+  it('keeps credits-only remaining percent when the tightest window has no dollar limit', () => {
+    expect(
+      accountUsageChipLabel({
+        copy,
+        credits: '$31.44',
+        providerName: 'OpenRouter',
+        quotaRatio: null,
+        remaining: 100
+      })
+    ).toBe('OpenRouter: $31.44 (100%)')
+  })
+
+  it('keeps the localized remaining-only phrasing for windows without credits or a dollar limit', () => {
+    expect(
+      accountUsageChipLabel({
+        copy,
+        credits: null,
+        providerName: 'Codex',
+        quotaRatio: null,
+        remaining: 83
+      })
+    ).toBe('Codex: 83% left')
   })
 })
