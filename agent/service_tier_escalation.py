@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from hermes_constants import (
     DEFAULT_SERVICE_TIER_ESCALATION,
+    SERVICE_TIER_BOUNDED_VALUES,
     ServiceTierEscalationConfig,
     parse_service_tier,
     resolve_service_tier_escalation_config,
@@ -29,6 +30,16 @@ _DISABLED_PLATFORMS = frozenset({"cron", "subagent"})
 # * Distinguishes ``begin_turn()`` (keep current base) from ``begin_turn(None)``
 # (explicit default / omit-on-wire baseline after a model switch).
 _KEEP_BASE_TIER = object()
+_WIRE_TIERS = frozenset({"flex", "priority"})
+
+
+def _ladder_tier(value) -> str | None:
+    """Map a stored preference onto the TTFT ladder (flex / default / priority).
+
+    ``auto`` / ``cold`` are bounded windows, not wire rungs — they sit at default.
+    """
+    parsed = parse_service_tier(value)
+    return parsed if parsed in _WIRE_TIERS else None
 
 
 class TtftObservation:
@@ -67,7 +78,7 @@ class ServiceTierEscalationState:
         base_tier: str | None = None,
     ) -> None:
         self.config = config or DEFAULT_SERVICE_TIER_ESCALATION
-        self.base_tier = parse_service_tier(base_tier)
+        self.base_tier = _ladder_tier(base_tier)
         self.effective_tier: str | None = self.base_tier
         self.streak = 0
         # * Rungs climbed from base this turn. Stored separately so a cap at
@@ -91,7 +102,7 @@ class ServiceTierEscalationState:
         is the default/normal rung (omit ``service_tier`` on the wire).
         """
         if base_tier is not _KEEP_BASE_TIER:
-            self.base_tier = parse_service_tier(base_tier)
+            self.base_tier = _ladder_tier(base_tier)
         self.effective_tier = self.base_tier
         self.streak = 0
         self.climbed_rungs = 0
@@ -157,7 +168,7 @@ def _next_tier(current: str | None) -> str | None:
 
 
 def _rung_index(tier: str | None) -> int:
-    parsed = parse_service_tier(tier)
+    parsed = _ladder_tier(tier)
     try:
         return _TIER_LADDER.index(parsed)
     except ValueError:
@@ -170,7 +181,7 @@ def _climbed_rungs(base_tier: str | None, effective_tier: str | None) -> int:
 
 def _climb_from(base_tier: str | None, rungs: int) -> str | None:
     """Walk *rungs* steps up from *base_tier*, capped at priority."""
-    base = parse_service_tier(base_tier)
+    base = _ladder_tier(base_tier)
     try:
         steps = int(rungs)
     except (TypeError, ValueError):
@@ -282,7 +293,7 @@ def rebase_escalation_runtime(agent: Any, new_base_tier: str | None) -> None:
     except (TypeError, ValueError):
         stored_rungs = 0
     rungs = max(stored_rungs, _climbed_rungs(state.base_tier, state.effective_tier))
-    new_base = parse_service_tier(new_base_tier)
+    new_base = _ladder_tier(new_base_tier)
     state.base_tier = new_base
     state.climbed_rungs = rungs
     state.effective_tier = _climb_from(new_base, rungs)
@@ -414,6 +425,9 @@ def apply_escalation_to_overrides(agent: Any, overrides: dict) -> dict:
         return overrides
 
     target = state.wire_tier if state.wire_locked else state.effective_tier
+    # * auto/cold windows own the per-request field until the ladder climbs.
+    if target is None and getattr(agent, "service_tier", None) in SERVICE_TIER_BOUNDED_VALUES:
+        return overrides
     present = parse_service_tier(overrides.get("service_tier"))
     if target is None and "service_tier" not in overrides and "speed" not in overrides:
         return overrides

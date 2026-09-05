@@ -621,3 +621,20 @@ class TestRebaseEscalationRuntime:
         rebase_escalation_runtime(agent, "flex")
         assert state.effective_tier == "priority"
         assert state.climbed_rungs == 2
+
+
+class TestBoundedAutoColdWindows:
+    def test_auto_is_default_ladder_rung_and_keeps_window_overrides(self):
+        agent = _agent(service_tier="auto")
+        assert agent._service_tier_escalation.base_tier is None
+        applied = apply_escalation_to_overrides(
+            agent, {"service_tier": "priority"}
+        )
+        assert applied.get("service_tier") == "priority"
+
+    def test_auto_mode_escalation_can_still_climb_to_priority(self):
+        agent = _agent(service_tier="auto")
+        agent._service_tier_escalation.observe_ttft(12.0, model="m")
+        assert agent._service_tier_escalation.effective_tier == "priority"
+        applied = apply_escalation_to_overrides(agent, {})
+        assert applied.get("service_tier") == "priority"

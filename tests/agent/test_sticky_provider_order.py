@@ -871,7 +871,7 @@ def _timeout_walk_conversation(agent, fallback_model, captured, *, on_primary_ti
         patch.object(agent, "_cleanup_task_resources"),
         patch("run_agent.OpenAI", return_value=MagicMock()),
         # * wait_time=0 so the retry loop's time.time() wait is a no-op.
-        patch("agent.conversation_loop.jittered_backoff", return_value=0.0),
+        patch("agent.retry_utils.jittered_backoff", return_value=0.0),
         patch(
             "agent.auxiliary_client.resolve_provider_client",
             return_value=(mock_fb, fallback_model),

@@ -1245,7 +1245,7 @@ class TestFallbackRebaseInRunConversation:
 
         captured = []
 
-        def fake_api_call(api_kwargs):
+        def fake_api_call(api_kwargs, on_first_delta=None, **_kwargs):
             captured.append(
                 {
                     "model": agent.model,
@@ -1264,6 +1264,7 @@ class TestFallbackRebaseInRunConversation:
 
         with (
             patch.object(agent, "_interruptible_api_call", side_effect=fake_api_call),
+            patch.object(agent, "_interruptible_streaming_api_call", side_effect=fake_api_call),
             patch.object(agent, "_persist_session"),
             patch.object(agent, "_save_trajectory"),
             patch.object(agent, "_cleanup_task_resources"),

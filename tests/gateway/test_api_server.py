@@ -611,7 +611,9 @@ class TestDisconnectedAgentReap:
         adapter._active_run_agents["run_x"] = agent
 
         request = MagicMock()
+        request.headers = {}
         request.match_info = {"run_id": "run_x"}
+        adapter._run_owners["run_x"] = adapter._run_idempotency_scope(request)
         resp = await adapter._handle_stop_run(request)
         assert resp.status == 200
 
@@ -3181,7 +3183,7 @@ def _run_fallback_conversation(agent, captured=None):
     agent.save_trajectories = False
     agent._api_max_retries = 1
 
-    def fake_api_call(api_kwargs):
+    def fake_api_call(api_kwargs, on_first_delta=None, **_kwargs):
         captured.append(
             {
                 "model": agent.model,
@@ -3200,6 +3202,7 @@ def _run_fallback_conversation(agent, captured=None):
 
     with (
         patch.object(agent, "_interruptible_api_call", side_effect=fake_api_call),
+        patch.object(agent, "_interruptible_streaming_api_call", side_effect=fake_api_call),
         patch.object(agent, "_persist_session"),
         patch.object(agent, "_save_trajectory"),
         patch.object(agent, "_cleanup_task_resources"),

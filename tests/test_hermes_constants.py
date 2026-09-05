@@ -416,6 +416,10 @@ class TestServiceTierParsing:
         assert parse_service_tier("default") is None
         assert parse_service_tier("not-a-tier") is None
 
+    def test_preserves_bounded_auto_and_cold_windows(self):
+        assert parse_service_tier("auto") == "auto"
+        assert parse_service_tier("COLD") == "cold"
+
 
 class TestResolveProviderRoutingForModel:
     """Per-model overlay is per-key; ``models`` never appears in the result."""
@@ -490,6 +494,34 @@ class TestResolveServiceTierForModel:
         assert resolve_service_tier_for_model(
             {"service_tier": "normal"},
             "other",
+        ) is None
+
+    def test_global_auto_and_cold_are_preserved(self):
+        from hermes_constants import resolve_service_tier_for_model
+
+        assert resolve_service_tier_for_model({"service_tier": "auto"}, "m") == "auto"
+        assert resolve_service_tier_for_model({"service_tier": "cold"}, "m") == "cold"
+
+    def test_per_model_auto_does_not_fall_back_to_global_priority(self):
+        from hermes_constants import resolve_service_tier_for_model
+
+        assert resolve_service_tier_for_model(
+            {
+                "service_tier": "priority",
+                "service_tier_overrides": {"m": "auto"},
+            },
+            "m",
+        ) == "auto"
+
+    def test_per_model_normal_does_not_fall_through_to_global_auto(self):
+        from hermes_constants import resolve_service_tier_for_model
+
+        assert resolve_service_tier_for_model(
+            {
+                "service_tier": "auto",
+                "service_tier_overrides": {"m": "normal"},
+            },
+            "m",
         ) is None
 
     def test_invalid_override_warns_and_falls_back(self, caplog):
