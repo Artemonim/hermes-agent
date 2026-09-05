@@ -1,7 +1,7 @@
 """Tests for SIGHUP protection and stdout mirroring in ``hermes update``.
 
 Covers ``_UpdateOutputStream``, ``_install_hangup_protection``, and
-``_finalize_update_output`` in ``hermes_cli/main.py``.  These exist so
+``_finalize_update_output`` in ``hermes_cli/main_dashboard.py``.  These exist so
 that ``hermes update`` survives a terminal disconnect mid-install
 (SSH drop, shell close) without leaving the venv half-installed.
 """
@@ -14,10 +14,12 @@ import sys
 
 import pytest
 
-from hermes_cli.main import (
+from hermes_cli.main_dashboard import (
     _UpdateOutputStream,
     _finalize_update_output,
     _install_hangup_protection,
+)
+from hermes_cli.update_cmd import (
     _log_only_write,
     _print_update_completion,
     _run_logged_subprocess,
