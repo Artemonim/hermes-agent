@@ -342,6 +342,9 @@ def _mirror_fast(sid, session, agent, arg) -> None:
                 base_url=getattr(agent, "base_url", None),
             ) or {}
         agent.request_overrides = {**current_overrides, **extra}
+        from agent.fast_mode import set_framework_baked_tier_keys
+
+        set_framework_baked_tier_keys(agent, extra)
         _emit("session.info", sid, _session_info(agent, session))
 
 

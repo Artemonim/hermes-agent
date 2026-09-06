@@ -222,6 +222,7 @@ class TestFastModeRouting(unittest.TestCase):
         assert route["runtime"]["api_mode"] == "chat_completions"
         # But request_overrides should be set
         assert route["request_overrides"] == {"service_tier": "priority"}
+        assert route["framework_baked_tier_keys"] == {"service_tier": "priority"}
 
         # OpenRouter catalog models may carry service_tier.
         stub.base_url = "https://openrouter.ai/api/v1"
@@ -249,6 +250,7 @@ class TestFastModeRouting(unittest.TestCase):
 
         assert route["runtime"]["provider"] == "openrouter"
         assert route.get("request_overrides") == {"service_tier": "priority"}
+        assert route.get("framework_baked_tier_keys") == {"service_tier": "priority"}
 
 
 class TestAnthropicFastMode(unittest.TestCase):
@@ -335,6 +337,7 @@ class TestAnthropicFastMode(unittest.TestCase):
 
         assert route["runtime"]["provider"] == "anthropic"
         assert route["request_overrides"] == {"speed": "fast"}
+        assert route["framework_baked_tier_keys"] == {"speed": "fast"}
 
 
 class TestAnthropicFastModeAdapter(unittest.TestCase):
@@ -388,6 +391,58 @@ class TestAnthropicFastModeAdapter(unittest.TestCase):
         assert "speed" not in kwargs
         assert "extra_headers" not in kwargs
 
+
+
+class TestCliFrameworkTierBake(unittest.TestCase):
+    """CLI /fast rebuild records resolver keys so ctor-cleared bake is restored."""
+
+    def test_unpinned_turn_records_empty_bake_set(self):
+        cli_mod = _import_cli()
+        stub = SimpleNamespace(
+            model="gpt-5.4",
+            api_key="primary-key",
+            base_url="https://api.openai.com/v1",
+            provider="openai",
+            api_mode="chat_completions",
+            acp_command=None,
+            acp_args=[],
+            _credential_pool=None,
+            service_tier=None,
+        )
+        route = cli_mod.HermesCLI._resolve_turn_agent_config(stub, "hi")
+        self.assertIsNone(route["request_overrides"])
+        self.assertEqual(route["framework_baked_tier_keys"], {})
+
+    def test_apply_bake_marks_only_resolver_keys(self):
+        from hermes_cli.cli_agent_setup_mixin import _apply_framework_tier_bake
+
+        agent = SimpleNamespace(request_overrides={"service_tier": "priority", "keep": 1})
+        _apply_framework_tier_bake(agent, {"service_tier": "priority"})
+        self.assertEqual(agent._framework_baked_tier_keys, frozenset({"service_tier"}))
+
+    def test_release_bake_strips_marked_keys_keeps_raw(self):
+        from hermes_cli.cli_agent_setup_mixin import (
+            _apply_framework_tier_bake,
+            _release_framework_tier_bake,
+        )
+
+        agent = SimpleNamespace(
+            request_overrides={"service_tier": "priority", "extra_body": {"keep": 1}},
+            _primary_runtime={
+                "request_overrides": {
+                    "service_tier": "priority",
+                    "extra_body": {"keep": 1},
+                },
+            },
+        )
+        _apply_framework_tier_bake(agent, {"service_tier": "priority"})
+        _release_framework_tier_bake(agent)
+        self.assertEqual(agent.request_overrides, {"extra_body": {"keep": 1}})
+        self.assertEqual(
+            agent._primary_runtime["request_overrides"],
+            {"extra_body": {"keep": 1}},
+        )
+        self.assertFalse(agent._framework_baked_tier_keys)
 
 
 class TestConfigDefault(unittest.TestCase):

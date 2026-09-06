@@ -1082,6 +1082,11 @@ class TurnRunner:
         overrides.update(turn_overrides)
         agent.request_overrides = overrides
         agent._gateway_turn_request_overrides = turn_overrides
+        from agent.fast_mode import set_framework_baked_tier_keys
+
+        # * Provenance from the turn route: only keys the gateway baked
+        # (session /fast), never user runtime_kwargs.request_overrides.
+        set_framework_baked_tier_keys(agent, turn_route.get("framework_baked_tier_keys"))
 
     def _wire_turn_agent_callbacks(self, agent, turn_route, reasoning_config,
                                    stream_delta_cb, interim_assistant_cb, want_interim_messages):

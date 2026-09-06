@@ -2269,6 +2269,12 @@ def init_agent(
     # * Surfaces that apply a session /fast set this True after construction. Default-off so
     # delegated children never inherit a parent session pin.
     agent._service_tier_session_pinned = False
+    # * Constructor does not write service_tier/speed into request_overrides;
+    # pre-existing keys on that dict stay unmarked raw user overrides.
+    # Surfaces that bake (/fast, gateway merge, TUI set) mark after construction.
+    from agent.fast_mode import set_framework_baked_tier_keys
+
+    set_framework_baked_tier_keys(agent, None)
     # * Batch / background constructors set this True so an enabled config cannot climb.
     agent._block_service_tier_escalation = False
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns

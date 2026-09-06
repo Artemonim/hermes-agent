@@ -1189,10 +1189,12 @@ def restore_primary_runtime(agent) -> bool:
                     f"fallback {previous_model} via {previous_provider} is no longer active."
                 )
         try:
-            from agent.fast_mode import logical_service_tier
-            from agent.service_tier_escalation import rebase_escalation_runtime
+            from agent.service_tier_escalation import (
+                escalation_base_tier,
+                rebase_escalation_runtime,
+            )
 
-            rebase_escalation_runtime(agent, logical_service_tier(agent))
+            rebase_escalation_runtime(agent, escalation_base_tier(agent))
         except Exception:
             logger.debug(
                 "restore_primary_runtime: service-tier escalation rebase failed",

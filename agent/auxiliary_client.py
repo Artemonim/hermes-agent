@@ -5647,7 +5647,8 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
     """Shallow copy of ``auxiliary.<task>.extra_body`` with ``reasoning_effort`` folded into
     ``reasoning`` unless one is configured (more specific wins). MoA tasks are excluded: their
     reasoning depth is per-slot in the preset. ``auxiliary.<task>.service_tier`` is a shorthand
-    for the top-level service-tier request field; explicit ``extra_body.service_tier`` wins."""
+    for the top-level service-tier request field (OpenRouter ``flex`` / ``priority`` only).
+    Explicit ``extra_body.service_tier`` wins over the shorthand; first-party routes omit it."""
     task_config = _get_auxiliary_task_config(task)
     raw = task_config.get("extra_body")
     result = dict(raw) if isinstance(raw, dict) else {}
@@ -5972,18 +5973,24 @@ def _build_call_kwargs(
     if merged_extra := _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm):
         # * Lift service_tier to a top-level kwarg (OpenRouter passthrough) and drop it from
         # extra_body so first-party routes never see an unsupported extra_body key.
-        mapped = None
-        raw_tier = merged_extra.get("service_tier")
-        if raw_tier:
-            from hermes_cli.models import resolve_service_tier_overrides
-            mapped = resolve_service_tier_overrides(
-                model, raw_tier, provider=provider, base_url=effective_base,
-            )
-            merged_extra.pop("service_tier", None)
-        if mapped:
-            kwargs.update(mapped)
-        if merged_extra:
-            kwargs["extra_body"] = merged_extra
+        from hermes_cli.models import apply_aux_service_tier_overrides
+
+        lifted = apply_aux_service_tier_overrides(
+            {"extra_body": merged_extra},
+            None,
+            model=model,
+            provider=provider,
+            base_url=effective_base,
+            task=task,
+        )
+        mapped_tier = {
+            key: lifted[key] for key in ("service_tier", "speed") if key in lifted
+        }
+        if mapped_tier:
+            kwargs.update(mapped_tier)
+        leftover_extra = lifted.get("extra_body")
+        if leftover_extra:
+            kwargs["extra_body"] = leftover_extra
     # Anthropic Messages adapters take reasoning via a private kwarg that plain OpenAI SDK clients
     # would reject; Portal Claude is dual-wire, so include it only when the catalog id selects
     # /v1/messages.

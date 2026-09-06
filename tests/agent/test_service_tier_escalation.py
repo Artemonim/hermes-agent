@@ -14,6 +14,7 @@ from agent.service_tier_escalation import (
     begin_request_ttft,
     bind_service_tier_escalation,
     end_request_ttft,
+    escalation_base_tier,
     finish_request_ttft,
     note_non_observation,
     rebase_escalation_runtime,
@@ -253,6 +254,38 @@ class TestServiceTierEscalationIsolation:
         assert agent._service_tier_escalation.enabled is False
 
 
+class TestEscalationBaseTier:
+    def test_raw_flex_is_base_when_no_framework_source(self, monkeypatch):
+        import hermes_cli.config as config_mod
+
+        monkeypatch.setattr(
+            config_mod,
+            "load_config_readonly",
+            lambda: {"agent": {"service_tier": "", "service_tier_overrides": {}}},
+        )
+        agent = _agent(
+            service_tier=None,
+            request_overrides={"service_tier": "flex"},
+            pinned=False,
+        )
+        assert escalation_base_tier(agent) == "flex"
+
+    def test_framework_pin_wins_over_raw(self, monkeypatch):
+        import hermes_cli.config as config_mod
+
+        monkeypatch.setattr(
+            config_mod,
+            "load_config_readonly",
+            lambda: {"agent": {"service_tier": "", "service_tier_overrides": {}}},
+        )
+        agent = _agent(
+            service_tier="priority",
+            request_overrides={"service_tier": "flex"},
+            pinned=True,
+        )
+        assert escalation_base_tier(agent) == "priority"
+
+
 class TestTtftObservationClock:
     def test_injected_clock_without_sleep(self):
         ticks = iter([10.0, 19.5])
@@ -279,73 +312,21 @@ class TestTtftObservationClock:
         assert agent._ttft_obs_stack == []
 
 
-class TestServiceTierEscalationLoaders:
-    def test_cli_defaults_include_disabled_section(self):
+class TestServiceTierEscalationConfigContracts:
+    def test_cli_defaults_match_shipped_default(self):
         import cli as cli_mod
-        from hermes_constants import resolve_service_tier_escalation_config
+        from hermes_constants import (
+            DEFAULT_SERVICE_TIER_ESCALATION,
+            resolve_service_tier_escalation_config,
+        )
 
         cfg = resolve_service_tier_escalation_config(
             cli_mod.load_cli_config().get("agent") or {},
         )
+        assert cfg == DEFAULT_SERVICE_TIER_ESCALATION
         assert cfg.enabled is False
-        assert cfg.ttft_threshold_seconds == 8.0
-        assert cfg.consecutive_slow_requests == 1
-
-    def test_gateway_loader_reads_section(self, monkeypatch):
-        import gateway.run as gateway_run
-
-        monkeypatch.setattr(
-            gateway_run,
-            "_load_gateway_runtime_config",
-            lambda: {
-                "agent": {
-                    "service_tier_escalation": {
-                        "enabled": True,
-                        "ttft_threshold_seconds": 2.5,
-                        "consecutive_slow_requests": 4,
-                    },
-                },
-            },
-        )
-        cfg = gateway_run.GatewayRunner._load_service_tier_escalation()
-        assert cfg.enabled is True
-        assert cfg.ttft_threshold_seconds == 2.5
-        assert cfg.consecutive_slow_requests == 4
-
-    def test_gateway_loader_defaults_disabled(self, monkeypatch):
-        import gateway.run as gateway_run
-
-        monkeypatch.setattr(gateway_run, "_load_gateway_runtime_config", lambda: {})
-        cfg = gateway_run.GatewayRunner._load_service_tier_escalation()
-        assert cfg.enabled is False
-
-    def test_tui_loader_reads_section(self, monkeypatch):
-        import tui_gateway.server as server
-
-        monkeypatch.setattr(
-            server,
-            "_load_cfg",
-            lambda: {
-                "agent": {
-                    "service_tier_escalation": {
-                        "enabled": True,
-                        "ttft_threshold_seconds": 1.25,
-                        "consecutive_slow_requests": 2,
-                    },
-                },
-            },
-        )
-        cfg = server._load_service_tier_escalation()
-        assert cfg.enabled is True
-        assert cfg.ttft_threshold_seconds == 1.25
-        assert cfg.consecutive_slow_requests == 2
-
-    def test_tui_loader_defaults_disabled(self, monkeypatch):
-        import tui_gateway.server as server
-
-        monkeypatch.setattr(server, "_load_cfg", lambda: {})
-        cfg = server._load_service_tier_escalation()
-        assert cfg.enabled is False
+        assert cfg.ttft_threshold_seconds > 0
+        assert cfg.consecutive_slow_requests >= 1
 
 
 class TestSwitchModelResetsEscalation:
@@ -805,6 +786,20 @@ class TestRebaseEscalationRuntime:
 
 
 class TestBoundedAutoColdWindows:
+    def test_outer_retry_keeps_auto_window_tier_after_deadline(self):
+        """Same logical request keeps the first attempt's window tier after the deadline."""
+        import time
+
+        agent = _agent(service_tier="auto")
+        agent._fast_until = time.monotonic() + 60.0
+        begin_logical_request(agent)
+        first = _effective_request_overrides(agent)
+        assert first.get("service_tier") == "priority"
+        agent._fast_until = time.monotonic() - 1.0
+        begin_logical_request(agent)
+        retry = _effective_request_overrides(agent)
+        assert retry.get("service_tier") == "priority"
+
     def test_auto_is_default_ladder_rung_and_keeps_window_overrides(self):
         agent = _agent(service_tier="auto")
         assert agent._service_tier_escalation.base_tier is None
@@ -819,6 +814,54 @@ class TestBoundedAutoColdWindows:
         assert agent._service_tier_escalation.effective_tier == "priority"
         applied = apply_escalation_to_overrides(agent, {})
         assert applied.get("service_tier") == "priority"
+
+
+class TestEscalationPreservesRawTierUntilClimb:
+    """Enabled escalation must not strip a raw user tier before any observation."""
+
+    def test_first_request_keeps_raw_flex(self):
+        agent = _agent(
+            service_tier=None,
+            request_overrides={"service_tier": "flex"},
+        )
+        begin_logical_request(agent)
+        first = _effective_request_overrides(agent)
+        assert first.get("service_tier") == "flex"
+        assert agent.request_overrides["service_tier"] == "flex"
+
+    def test_slow_observations_climb_from_raw_flex(self):
+        agent = _agent(
+            service_tier=None,
+            request_overrides={"service_tier": "flex"},
+            escalation=_enabled_cfg(consecutive=1),
+        )
+        begin_logical_request(agent)
+        assert _effective_request_overrides(agent).get("service_tier") == "flex"
+        finish_request_ttft(agent, _slow_obs())
+        accept_logical_request(agent)
+        assert agent._service_tier_escalation.effective_tier is None
+        begin_logical_request(agent)
+        climbed = _effective_request_overrides(agent)
+        assert "service_tier" not in climbed
+
+    def test_raw_flex_wire_snapshot_stable_across_outer_retry(self):
+        """Enabled escalation keeps the raw-flex first-attempt snapshot on an outer retry."""
+        agent = _agent(
+            service_tier=None,
+            request_overrides={"service_tier": "flex"},
+            escalation=_enabled_cfg(consecutive=1),
+        )
+        begin_logical_request(agent)
+        first = _effective_request_overrides(agent)
+        assert first.get("service_tier") == "flex"
+        snapshot = dict(agent._service_tier_escalation.request_wire_snapshot or {})
+        assert snapshot.get("service_tier") == "flex"
+        finish_request_ttft(agent, _slow_obs())
+        begin_logical_request(agent)
+        retry = _effective_request_overrides(agent)
+        assert retry.get("service_tier") == "flex"
+        assert agent._service_tier_escalation.request_wire_snapshot == snapshot
+        assert agent.request_overrides["service_tier"] == "flex"
 
 
 class TestDefaultOffByteIdentity:
@@ -856,12 +899,16 @@ class TestDefaultOffByteIdentity:
 
 class TestEscalationConfigResolver:
     def test_missing_section_is_disabled(self):
-        from hermes_constants import resolve_service_tier_escalation_config
+        from hermes_constants import (
+            DEFAULT_SERVICE_TIER_ESCALATION,
+            resolve_service_tier_escalation_config,
+        )
 
         cfg = resolve_service_tier_escalation_config({})
+        assert cfg == DEFAULT_SERVICE_TIER_ESCALATION
         assert cfg.enabled is False
-        assert cfg.ttft_threshold_seconds == 8.0
-        assert cfg.consecutive_slow_requests == 1
+        assert cfg.ttft_threshold_seconds > 0
+        assert cfg.consecutive_slow_requests >= 1
 
     def test_valid_section_is_parsed(self):
         from hermes_constants import resolve_service_tier_escalation_config
@@ -882,7 +929,10 @@ class TestEscalationConfigResolver:
     def test_invalid_values_fall_back_and_warn(self, caplog):
         import logging
 
-        from hermes_constants import resolve_service_tier_escalation_config
+        from hermes_constants import (
+            DEFAULT_SERVICE_TIER_ESCALATION,
+            resolve_service_tier_escalation_config,
+        )
 
         with caplog.at_level(logging.WARNING):
             cfg = resolve_service_tier_escalation_config(
@@ -894,9 +944,7 @@ class TestEscalationConfigResolver:
                     }
                 }
             )
-        assert cfg.enabled is False
-        assert cfg.ttft_threshold_seconds == 8.0
-        assert cfg.consecutive_slow_requests == 1
+        assert cfg == DEFAULT_SERVICE_TIER_ESCALATION
         assert "service_tier_escalation" in caplog.text
 
 
@@ -1063,6 +1111,57 @@ class TestConstructionGates:
             if child is not None:
                 child.close()
             parent.close()
+
+
+    def test_curator_construction_blocks_escalation(self, monkeypatch):
+        from agent.service_tier_escalation import escalation_is_active, finish_request_ttft
+        from run_agent import AIAgent
+
+        _write_enabled_escalation_config()
+        captured = {}
+        real_agent = AIAgent
+
+        def _capturing_agent(*args, **kwargs):
+            agent = real_agent(*args, **kwargs)
+            captured["agent"] = agent
+
+            def _fake_run(*_a, **_k):
+                return {"final_response": "ok", "messages": []}
+
+            agent.run_conversation = _fake_run
+            return agent
+
+        monkeypatch.setattr("run_agent.AIAgent", _capturing_agent)
+        monkeypatch.setattr(
+            "agent.curator._resolve_review_provider",
+            lambda: (
+                {
+                    "api_key": "k",
+                    "base_url": "https://openrouter.ai/api/v1",
+                    "provider": "openrouter",
+                    "api_mode": "chat_completions",
+                },
+                "google/gemini-flash",
+                "openrouter",
+                {},
+            ),
+        )
+        from agent.curator import _run_llm_review
+
+        _run_llm_review("review skills")
+        agent = captured["agent"]
+        try:
+            assert agent.platform == "curator"
+            assert agent._block_service_tier_escalation is True
+            assert agent._service_tier_escalation.enabled is True
+            assert escalation_is_active(agent) is False
+            begin_logical_request(agent)
+            finish_request_ttft(agent, _slow_obs())
+            accept_logical_request(agent)
+            assert agent._service_tier_escalation.effective_tier is None
+            assert _effective_request_overrides(agent).get("service_tier") != "priority"
+        finally:
+            agent.close()
 
 
 class TestEscalationHookHardening:

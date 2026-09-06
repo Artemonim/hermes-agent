@@ -16,7 +16,6 @@ from dataclasses import dataclass, field, fields
 from typing import Any, Dict, List, Optional
 
 from agent.codex_responses_adapter import _summarize_user_message_for_log
-from agent.fast_mode import begin_turn as begin_fast_mode_turn
 from agent.message_metadata import append_message
 from agent.message_sanitization import _repair_tool_call_arguments, _sanitize_surrogates
 from agent.model_metadata import MINIMUM_CONTEXT_LENGTH, _estimate_tools_tokens_rough
@@ -66,8 +65,8 @@ _INTERRUPT_SCAFFOLD_MARKER = "[This response was interrupted by a user correctio
 def _escalation_hooks_wanted(agent: Any) -> bool:
     """Cheap default-off gate for TTFT escalation turn hooks.
 
-    Reads the already-bound state only — no module import. When the config
-    is off (the default) this is one getattr.
+    Reads the already-bound state only — no module import and no clock reads.
+    When the config is off (the default) this is one getattr.
     """
     state = getattr(agent, "_service_tier_escalation", None)
     return bool(state is not None and getattr(state, "enabled", False))
@@ -1454,14 +1453,8 @@ def run_conversation(
     # in-place boundary would make a later uncompressed result look compacted.
     agent._last_compaction_in_place = agent._last_compression_attempt_recorded = False
     agent._last_compression_attempt_in_place = None
-    begin_fast_mode_turn(agent, conversation_history)
-    if _escalation_hooks_wanted(agent):
-        try:
-            from agent.service_tier_escalation import begin_escalation_turn
-
-            begin_escalation_turn(agent)
-        except Exception:
-            logger.warning("service-tier escalation begin_escalation_turn failed", exc_info=True)
+    # * Deadline origin for auto/cold; the window itself opens after primary restore.
+    agent._fast_turn_started_at = time.monotonic()
 
     # Adopt ~/.hermes/.env credential/base-url edits made since the last turn — a
     # Settings save updates .env, not this worker's client (#67821). No-op if unchanged.
@@ -1491,6 +1484,14 @@ def run_conversation(
         )
     except PreflightCompressionTimedOut as _preflight_timeout_exc:
         return _preflight_timeout_result(agent, _preflight_timeout_exc, conversation_history)
+
+    if _escalation_hooks_wanted(agent):
+        try:
+            from agent.service_tier_escalation import begin_escalation_turn
+
+            begin_escalation_turn(agent)
+        except Exception:
+            logger.warning("service-tier escalation begin_escalation_turn failed", exc_info=True)
 
     # Per-turn agent state (the gateway caches agents across turns, so none of this may
     # leak into the next message): interim-commentary dedup spans the whole turn but not

@@ -96,6 +96,55 @@ def test_bounded_fast_window_policy(monkeypatch):
     assert fast_mode.effective_request_overrides(off) == {"extra_body": {"keep": 1}}
 
 
+def test_bounded_window_opens_for_restored_primary_auto_and_cold(monkeypatch):
+    """Window decision uses the restored primary, deadline stays the turn-start stamp."""
+    clock = [1000.0]
+    monkeypatch.setattr(fast_mode.time, "monotonic", lambda: clock[0])
+    cfg = {
+        "agent": {
+            "service_tier": "",
+            "service_tier_overrides": {"gpt-5.4": "auto"},
+            "fast_auto_seconds": 60,
+        }
+    }
+    import hermes_cli.config as config_mod
+
+    monkeypatch.setattr(config_mod, "load_config_readonly", lambda: cfg)
+
+    started = clock[0]
+    agent = _agent(model="fallback-model", service_tier=None, fast_auto_seconds=60)
+    fast_mode.begin_turn(agent, conversation_history=[], started_at=started)
+    assert getattr(agent, "_fast_until", 0.0) == 0.0
+
+    clock[0] += 5.0
+    agent.model = "gpt-5.4"
+    fast_mode.begin_turn(agent, conversation_history=[], started_at=started)
+    assert agent._fast_until == started + 60
+    assert fast_mode.effective_request_overrides(agent)["service_tier"] == "priority"
+
+    cold_cfg = {
+        "agent": {
+            "service_tier": "",
+            "service_tier_overrides": {"gpt-5.4": "cold"},
+            "fast_auto_seconds": 60,
+        }
+    }
+    monkeypatch.setattr(config_mod, "load_config_readonly", lambda: cold_cfg)
+    cold = _agent(model="fallback-model", service_tier=None, fast_auto_seconds=60)
+    fast_mode.begin_turn(cold, conversation_history=[], started_at=started)
+    assert getattr(cold, "_fast_until", 0.0) == 0.0
+    cold.model = "gpt-5.4"
+    fast_mode.begin_turn(cold, conversation_history=[], started_at=started)
+    assert cold._fast_until == started + 60
+    assert fast_mode.effective_request_overrides(cold)["service_tier"] == "priority"
+    fast_mode.begin_turn(
+        cold,
+        conversation_history=[{"role": "user", "content": "prior"}],
+        started_at=started,
+    )
+    assert getattr(cold, "_fast_until", 0.0) == 0.0
+
+
 def test_fast_auto_and_cold_parse_and_slash_command(monkeypatch):
     import hermes_cli.config as config_mod
 

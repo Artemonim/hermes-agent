@@ -552,6 +552,8 @@ class CLISessionMixin:
             self.agent.reasoning_config = self.reasoning_config
             self.agent.service_tier = self.service_tier
             self.agent._service_tier_session_pinned = False
+            from hermes_cli.cli_agent_setup_mixin import _release_framework_tier_bake
+            _release_framework_tier_bake(self.agent)
             self.agent.reset_session_state()
             if hasattr(self.agent, "_last_flushed_db_idx"):
                 self.agent._last_flushed_db_idx = 0

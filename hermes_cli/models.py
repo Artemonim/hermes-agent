@@ -1049,6 +1049,112 @@ def resolve_service_tier_overrides(
     return None
 
 
+_aux_service_tier_ignored: set[str] = set()
+
+
+def _warn_aux_service_tier_ignored(
+    task: Optional[str], raw: Any, provider: Optional[str], base_url: Optional[str],
+) -> None:
+    """One warning per aux task that set a first-party ``service_tier`` shortcut."""
+    key = str(task or "").strip() or str(provider or base_url or "aux")
+    if key in _aux_service_tier_ignored:
+        return
+    _aux_service_tier_ignored.add(key)
+    logger.warning(
+        "auxiliary%s.service_tier is OpenRouter-only; ignoring %r for %s",
+        f".{task}" if task else "",
+        raw,
+        provider or base_url or "this route",
+    )
+
+
+def apply_aux_service_tier_overrides(
+    overrides: dict[str, Any] | None,
+    slot: dict[str, Any] | None,
+    *,
+    model: Optional[str],
+    provider: Optional[str],
+    base_url: Optional[str],
+    task: Optional[str] = None,
+) -> dict[str, Any]:
+    """Lift an auxiliary slot's ``service_tier`` onto top-level request kwargs.
+
+    Precedence: ``extra_body.service_tier`` (already-merged overrides, then
+    ``slot.extra_body``) > slot ``service_tier``. OpenRouter
+    ``flex`` / ``priority`` become a top-level ``service_tier``; first-party
+    routes omit the key (main-chat /fast mapping is not applied). Call after
+    the slot's runtime is known.
+    """
+    merged = dict(overrides or {})
+    extra_src = merged.get("extra_body")
+    had_dict_extra = isinstance(extra_src, dict)
+    extra = dict(extra_src) if had_dict_extra else {}
+    extra_tier = extra.get("service_tier") if had_dict_extra else None
+    slot_extra = slot.get("extra_body") if isinstance(slot, dict) else None
+    slot_extra_tier = slot_extra.get("service_tier") if isinstance(slot_extra, dict) else None
+    slot_tier = slot.get("service_tier") if isinstance(slot, dict) else None
+    # * extra_body.service_tier (already-merged, then slot) beats slot.service_tier.
+    if extra_tier not in (None, ""):
+        raw = extra_tier
+    elif slot_extra_tier not in (None, ""):
+        raw = slot_extra_tier
+    else:
+        raw = slot_tier
+    if raw in (None, ""):
+        return merged
+    if had_dict_extra:
+        extra.pop("service_tier", None)
+        if extra:
+            merged["extra_body"] = extra
+        else:
+            merged.pop("extra_body", None)
+    if not _is_openrouter_service_tier_route(provider, base_url):
+        _warn_aux_service_tier_ignored(task, raw, provider, base_url)
+        return merged
+    mapped = resolve_service_tier_overrides(
+        model, raw, provider=provider, base_url=base_url,
+    )
+    merged.pop("service_tier", None)
+    merged.pop("speed", None)
+    if mapped:
+        merged.update(mapped)
+    return merged
+
+
+def aux_slot_configures_service_tier(slot: dict[str, Any] | None) -> bool:
+    """True when the aux slot names a ``service_tier`` (top-level or extra_body)."""
+    if not isinstance(slot, dict):
+        return False
+    extra = slot.get("extra_body")
+    extra_tier = extra.get("service_tier") if isinstance(extra, dict) else None
+    return extra_tier not in (None, "") or slot.get("service_tier") not in (None, "")
+
+
+def bind_aux_slot_service_tier(agent: Any, slot: dict[str, Any] | None) -> None:
+    """Make the aux-resolved tier the authority for this agent's wire keys.
+
+    Uses the constructed agent's own ``request_overrides`` (already lifted by
+    :func:`apply_aux_service_tier_overrides`). Pins the slot tier (including
+    first-party omit) so global ``agent.service_tier`` cannot re-resolve over
+    it. Marks the mapped keys as framework-baked so they are not treated as
+    raw user intent. No-op when the slot does not configure a tier.
+    """
+    if not aux_slot_configures_service_tier(slot):
+        return
+    from hermes_constants import parse_service_tier
+    from agent.fast_mode import TIER_WIRE_KEYS, set_framework_baked_tier_keys
+
+    overrides = getattr(agent, "request_overrides", None)
+    mapped = {
+        key: overrides[key]
+        for key in TIER_WIRE_KEYS
+        if isinstance(overrides, dict) and key in overrides
+    }
+    agent.service_tier = parse_service_tier(mapped.get("service_tier"))
+    agent._service_tier_session_pinned = True
+    set_framework_baked_tier_keys(agent, mapped or None)
+
+
 def _first_exchangeable_copilot_token(raw_tokens) -> str:
     """Exchange stored GitHub tokens in order; the first that validates AND exchanges wins (every
     entry is tried so a later valid token survives an earlier malformed one)."""

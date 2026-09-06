@@ -2130,10 +2130,12 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         _rescope_fallback_extra_body(agent, old_model, old_provider, old_base_url)
         rewrite_prompt_model_identity(agent, fb_model, fb_provider)
         try:
-            from agent.fast_mode import logical_service_tier
-            from agent.service_tier_escalation import rebase_escalation_runtime
+            from agent.service_tier_escalation import (
+                escalation_base_tier,
+                rebase_escalation_runtime,
+            )
 
-            rebase_escalation_runtime(agent, logical_service_tier(agent))
+            rebase_escalation_runtime(agent, escalation_base_tier(agent))
         except Exception:
             logger.debug(
                 "Fallback %s: service-tier escalation rebase failed",
@@ -2764,7 +2766,8 @@ class _StreamingCall:
         # Per-attempt: single-writer token, request-local client, raw HTTP response (chat wire).
         self._writer_token = self._attempt_request_client = self._attempt_stream_response = None
         # * Bind TTFT marks only when perform_api_call already stacked an obs
-        # (escalation is active). Default-off: no import; each chunk is a None check.
+        # (escalation is active). Disabled: no clock reads and no module import;
+        # a single None-check per streamed delta.
         stack = getattr(agent, "_ttft_obs_stack", None)
         if stack:
             from agent.service_tier_escalation import mark_ttft_first_delta, mark_ttft_send

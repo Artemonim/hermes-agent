@@ -2521,8 +2521,63 @@ class TestAuxiliaryTaskExtraBody:
             messages=[{"role": "user", "content": "hi"}],
             extra_body=body,
             base_url="https://api.openai.com/v1",
+            task="compression",
         )
         assert "service_tier" not in kwargs
+        assert "speed" not in kwargs
+        assert "service_tier" not in (kwargs.get("extra_body") or {})
+
+    def test_task_service_tier_priority_ignored_on_first_party_openai(self):
+        from agent.auxiliary_client import _build_call_kwargs, _get_task_extra_body
+
+        config = {"auxiliary": {"compression": {"service_tier": "priority"}}}
+        with patch("hermes_cli.config.load_config_readonly", return_value=config):
+            body = _get_task_extra_body("compression")
+        kwargs = _build_call_kwargs(
+            provider="openai",
+            model="gpt-5.4",
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body=body,
+            base_url="https://api.openai.com/v1",
+            task="compression",
+        )
+        assert "service_tier" not in kwargs
+        assert "speed" not in kwargs
+        assert "service_tier" not in (kwargs.get("extra_body") or {})
+
+    def test_task_service_tier_priority_ignored_on_first_party_anthropic(self):
+        from agent.auxiliary_client import _build_call_kwargs, _get_task_extra_body
+
+        config = {"auxiliary": {"compression": {"service_tier": "priority"}}}
+        with patch("hermes_cli.config.load_config_readonly", return_value=config):
+            body = _get_task_extra_body("compression")
+        kwargs = _build_call_kwargs(
+            provider="anthropic",
+            model="claude-opus-5",
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body=body,
+            base_url="https://api.anthropic.com",
+            task="compression",
+        )
+        assert "service_tier" not in kwargs
+        assert "speed" not in kwargs
+        assert "service_tier" not in (kwargs.get("extra_body") or {})
+
+    def test_task_service_tier_priority_lifts_on_openrouter(self):
+        from agent.auxiliary_client import _build_call_kwargs, _get_task_extra_body
+
+        config = {"auxiliary": {"compression": {"service_tier": "priority"}}}
+        with patch("hermes_cli.config.load_config_readonly", return_value=config):
+            body = _get_task_extra_body("compression")
+        kwargs = _build_call_kwargs(
+            provider="openrouter",
+            model="openai/gpt-5",
+            messages=[{"role": "user", "content": "hi"}],
+            extra_body=body,
+            base_url="https://openrouter.ai/api/v1",
+            task="compression",
+        )
+        assert kwargs["service_tier"] == "priority"
         assert "service_tier" not in (kwargs.get("extra_body") or {})
 
     def test_extra_body_service_tier_wins_over_shortcut(self):

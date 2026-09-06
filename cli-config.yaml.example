@@ -822,6 +822,9 @@ prompt_caching:
 #                            # Increase for slow connections or self-hosted image servers
 #     reasoning_effort: ""   # Per-task thinking level: none, minimal, low, medium,
 #                            # high, xhigh, max, ultra. Empty = provider default.
+#                            # service_tier: flex | priority  OpenRouter-only
+#                            # queue for this aux slot (extra_body.service_tier
+#                            # wins; first-party routes ignore it).
 #                            # Works on every auxiliary task block (vision,
 #                            # web_extract, compression, title_generation, curator,
 #                            # background_review, moa_reference, ...). Example: run
@@ -890,6 +893,7 @@ prompt_caching:
 #     enabled: true            # false = skip automatic forks (/refine still works)
 #     provider: "auto"         # or pin a cheaper model (see memory.md)
 #     model: ""
+#     # service_tier: "flex"   # OpenRouter-only; extra_body.service_tier wins
 
 # =============================================================================
 # Persistent Memory
@@ -1242,7 +1246,9 @@ agent:
   # consecutive_slow_requests slow successes climb one rung (flex -> default ->
   # priority) for the REST of that turn; the next user prompt resets to the
   # configured base. Never mutates agent.service_tier / request_overrides.
-  # Hard-off for cron, batch, subagents, background tasks, and /fast pins.
+  # Hard-off for cron, batch, subagents, curator, background tasks, and /fast pins.
+  # When disabled: no clock reads and no module import; a single None-check per
+  # streamed delta.
   # Non-streaming calls, length-continuation, and compression/redirect restarts
   # produce no observation (conservative under-escalation).
   # service_tier_escalation:

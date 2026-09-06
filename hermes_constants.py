@@ -1112,17 +1112,14 @@ def resolve_per_model_provider_routing(model: str, models: dict | None) -> dict:
     return {}
 
 
-def resolve_service_tier_for_model(agent_cfg, model: str = "", *, fallback=None) -> str | None:
-    """Resolve effective service tier: per-model override, else global, else *fallback*.
+def resolve_service_tier_source(
+    agent_cfg, model: str = "", *, fallback=None,
+) -> tuple[str | None, bool]:
+    """``(tier, configured)`` for per-model then global then *fallback*.
 
-    Session pins are applied by callers *before* this function. Values go
-    through :func:`parse_service_tier` (``flex`` / ``priority`` / ``auto`` /
-    ``cold``; ``normal`` / ``default`` / empty → ``None``). An invalid
-    per-model value logs a warning and falls back to ``agent.service_tier``;
-    an invalid global value logs a warning and returns ``None``. When the
-    global key is unset, *fallback* (typically the constructor
-    ``agent.service_tier``) is used so programmatic agents keep working
-    without a config.yaml.
+    *configured* is True when a framework source exists, including explicit
+    ``normal`` / ``default`` (tier is ``None``). Empty or missing global
+    ``service_tier`` is not a source; a present per-model key is.
     """
     if not isinstance(agent_cfg, dict):
         agent_cfg = {}
@@ -1140,10 +1137,10 @@ def resolve_service_tier_for_model(agent_cfg, model: str = "", *, fallback=None)
     if matched:
         parsed_override = parse_service_tier(raw_override)
         if parsed_override is not None:
-            return parsed_override
+            return parsed_override, True
         normalized = str(raw_override or "").strip().lower()
         if not normalized or normalized in SERVICE_TIER_DISABLED_VALUES:
-            return None
+            return None, True
         import logging
         logging.getLogger(__name__).warning(
             "Unknown service_tier override '%s' for model '%s', "
@@ -1155,18 +1152,43 @@ def resolve_service_tier_for_model(agent_cfg, model: str = "", *, fallback=None)
     raw_global = agent_cfg.get("service_tier", "")
     normalized_global = str(raw_global or "").strip().lower()
     if not normalized_global:
-        return parse_service_tier(fallback)
+        parsed_fallback = parse_service_tier(fallback)
+        return parsed_fallback, parsed_fallback is not None
     parsed_global = parse_service_tier(raw_global)
     if parsed_global is not None:
-        return parsed_global
+        return parsed_global, True
     if normalized_global in SERVICE_TIER_DISABLED_VALUES:
-        return None
+        return None, True
     import logging
     logging.getLogger(__name__).warning(
         "Unknown service_tier '%s', ignoring",
         raw_global,
     )
-    return None
+    return None, False
+
+
+def resolve_service_tier_for_model(agent_cfg, model: str = "", *, fallback=None) -> str | None:
+    """Resolve effective service tier: per-model override, else global, else *fallback*.
+
+    Session pins are applied by callers *before* this function. Values go
+    through :func:`parse_service_tier` (``flex`` / ``priority`` / ``auto`` /
+    ``cold``; ``normal`` / ``default`` / empty → ``None``). An invalid
+    per-model value logs a warning and falls back to ``agent.service_tier``;
+    an invalid global value logs a warning and returns ``None``. When the
+    global key is unset, *fallback* (typically the constructor
+    ``agent.service_tier``) is used so programmatic agents keep working
+    without a config.yaml.
+    """
+    return resolve_service_tier_source(agent_cfg, model, fallback=fallback)[0]
+
+
+def service_tier_source_is_configured(agent_cfg, model: str = "", *, fallback=None) -> bool:
+    """True when a framework tier source exists, including explicit ``normal``.
+
+    Empty / missing global ``service_tier`` is not a source (default-off
+    passthrough). A present per-model key — even ``normal`` / empty — is.
+    """
+    return resolve_service_tier_source(agent_cfg, model, fallback=fallback)[1]
 
 
 def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:

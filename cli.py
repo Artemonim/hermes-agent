@@ -4445,6 +4445,7 @@ def _run_single_query_mode(cli, query, image, quiet, oneshot):
                     model_override=turn_route["model"],
                     runtime_override=turn_route["runtime"],
                     request_overrides=turn_route.get("request_overrides"),
+                    framework_baked_tier_keys=turn_route.get("framework_baked_tier_keys"),
                 ):
                     _configure_quiet_agent(cli.agent)
                     _run_quiet_single_query(cli, effective_query)

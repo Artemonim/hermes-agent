@@ -1326,13 +1326,14 @@ Every model slot in Hermes — auxiliary tasks, compression, fallback — uses t
 | `model` | Which model to request | provider's default |
 | `base_url` | Custom OpenAI-compatible endpoint (overrides provider) | not set |
 
-Auxiliary task blocks additionally accept a `reasoning_effort` knob:
+Auxiliary task blocks additionally accept a `reasoning_effort` knob and an OpenRouter-only `service_tier` shortcut:
 
 | Key | What it does | Default |
 |-----|-------------|---------|
 | `reasoning_effort` | Thinking level for that task's LLM calls: `none`, `minimal`, `low`, `medium`, `high`, `xhigh`, `max`, `ultra` | not set (provider default) |
+| `service_tier` | OpenRouter queue: `flex` or `priority`. Applied after the slot's runtime resolves. First-party routes ignore it. | not set |
 
-This is the per-task counterpart of the global `agent.reasoning_effort`: run compression at `low` or vision at `none` to cut side-task latency and cost when your main model is an expensive reasoning model, without touching your main chat behavior. It works on every auxiliary task block (`vision`, `compression`, `title_generation`, `curator`, `background_review`, ...), across all three auxiliary wire formats (chat completions, Codex Responses, Anthropic Messages). An explicit `extra_body.reasoning` on the same task wins over the shorthand.
+This is the per-task counterpart of the global `agent.reasoning_effort`: run compression at `low` or vision at `none` to cut side-task latency and cost when your main model is an expensive reasoning model, without touching your main chat behavior. It works on every auxiliary task block (`vision`, `compression`, `title_generation`, `curator`, `background_review`, ...), across all three auxiliary wire formats (chat completions, Codex Responses, Anthropic Messages). An explicit `extra_body.service_tier` on the same task wins over the `service_tier` shorthand; `extra_body.reasoning` wins over `reasoning_effort`.
 
 MoA is the one exception: reasoning depth for Mixture-of-Agents is configured **per slot** in the MoA preset (`moa.presets.<name>.reference_models[].reasoning_effort` / `aggregator.reasoning_effort`), not on the `moa_reference`/`moa_aggregator` auxiliary blocks — see [Mixture of Agents](/user-guide/features/mixture-of-agents).
 
@@ -1762,7 +1763,7 @@ agent:
 | `auto` | Requests in the first `fast_auto_seconds` of **every** turn | Snappy first reply; long tool loops fall back to standard pricing |
 | `cold` | Same window, but only on the **first turn** of a session (no prior history) | Fast onboarding reply, standard pricing afterwards |
 
-**Precedence:** session `/fast` pin (including `/fast normal`) **>** `agent.service_tier_overrides` for the current model **>** global `agent.service_tier`. An explicit `/fast` choice survives `/model` and clears only on session reset. Because resolution is per request, `/model` switches, provider fallback/restore, cron agents, and delegated children on another model all get the overlay for *their* model — children never inherit a parent session pin.
+**Precedence:** session `/fast` pin (including `/fast normal`) **>** `agent.service_tier_overrides` for the current model **>** global `agent.service_tier` **>** raw user-supplied `request_overrides.service_tier` / `speed` (delegation `request_overrides`, API callers). An explicit `/fast` choice survives `/model` and clears only on session reset. Because resolution is per request, `/model` switches, provider fallback/restore, cron agents, and delegated children on another model all get the overlay for *their* model — children never inherit a parent session pin. Framework-baked `/fast` and loader keys are replaced each request; raw user keys pass through only when no framework source applies.
 
 `/fast normal|fast|flex|auto|cold` switches the mode for the session; add `--global` to persist to `config.yaml`. `/fast` (and `/fast status`) reports the **effective** tier for the session's current model without a capability gate; only switching **to** `fast` stays route-gated (OpenRouter or a first-party fast model).
 
@@ -1780,7 +1781,9 @@ agent:
     consecutive_slow_requests: 1   # raise for a softer trigger
 ```
 
-Escalation never fires while a session `/fast` pin is active, and never applies to cron jobs, batch runs, subagents, or background tasks (CLI `/bg`, gateway `/bg`, TUI background). Provider errors are not escalation input. Retried or interrupted requests don't count as slow observations, and a retry of the same logical request always runs on the tier that attempt started with. Provider fallback rebases the ladder onto the new model's base tier while keeping climbed rungs and the slow-streak.
+Escalation never fires while a session `/fast` pin is active, and never applies to cron jobs, batch runs, subagents, curator runs, or background tasks (CLI `/bg`, gateway `/bg`, TUI background, post-turn background review). Provider errors are not escalation input. Retried or interrupted requests don't count as slow observations, and a retry of the same logical request always runs on the tier that attempt started with. Provider fallback rebases the ladder onto the new model's base tier while keeping climbed rungs and the slow-streak.
+
+When disabled (the default) there are no clock reads and no observation stack on the streaming path; the collector import itself is cheap, and a single None-check runs per streamed delta.
 
 Known limitations (conservative under-escalation; do not treat as bugs): the non-streaming fallback path produces no observation; Codex streaming is not timed; length-continuation and compression/redirect restarts drop the in-flight sample. Escalation state is per-agent, never copied to delegated children, and never persisted to SessionDB. Escalations are logged at INFO (`agent.log`). The setting is picked up when an agent is constructed (new CLI/TUI session, new gateway agent). Cached gateway agents keep the construction-time value.
 
@@ -2704,7 +2707,7 @@ delegation:
 
 **Direct endpoint override:** If you want the obvious custom-endpoint path, set `delegation.base_url`, `delegation.api_key`, and `delegation.model`. That sends subagents directly to that OpenAI-compatible endpoint and takes precedence over `delegation.provider`. If `delegation.api_key` is omitted, Hermes falls back to `OPENAI_API_KEY` only. When `delegation.provider` is set alongside `delegation.base_url`, the explicit endpoint and key still win, but that provider's request settings (`extra_body` overrides and max output tokens from your `custom_providers` entry) are carried into the subagent.
 
-**Per-child request settings (`request_overrides`):** `delegation.request_overrides` is a dict of request settings sent on every subagent API call. Top-level keys are API kwargs (e.g. `service_tier`); an `extra_body` sub-dict is merged into the request's `extra_body`. It is honored on **all three** resolution branches — direct `base_url`, named `provider`, and pure inherit — so the key always takes effect. Precedence: explicit `request_overrides` values merge **over** any runtime- or parent-derived overrides — top-level explicit keys win, and `extra_body` is deep-merged one level so runtime `extra_body` keys (e.g. a provider's `thinking: {type: disabled}` personality) survive unless your key redefines them. The canonical use case is OpenRouter routing hints for delegation children:
+**Per-child request settings (`request_overrides`):** `delegation.request_overrides` is a dict of request settings sent on every subagent API call. Top-level keys are API kwargs (e.g. `service_tier`); an `extra_body` sub-dict is merged into the request's `extra_body`. It is honored on **all three** resolution branches — direct `base_url`, named `provider`, and pure inherit — so the key always takes effect. Precedence: explicit `request_overrides` values merge **over** any runtime- or parent-derived overrides — top-level explicit keys win, and `extra_body` is deep-merged one level so runtime `extra_body` keys (e.g. a provider's `thinking: {type: disabled}` personality) survive unless your key redefines them. A child's raw `service_tier` / `speed` still lose to a framework source on that child (session pin > per-model overlay > global `agent.service_tier`). The canonical use case is OpenRouter routing hints for delegation children:
 
 ```yaml
 delegation:

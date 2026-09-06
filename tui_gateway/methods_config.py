@@ -171,10 +171,7 @@ def _cfg_get_fast(params):
     # None-inherit (unset pin falling through to global) is an accepted display gap.
     session = _sessions.get(params.get("session_id", "")) or {}
     agent = session.get("agent")
-    tier = (getattr(agent, "service_tier", None) if agent is not None
-            else session.get("create_service_tier_override"))
-    if tier is None:
-        tier = _load_service_tier()
+    tier = _effective_session_service_tier(agent, session)
     return {"value": _fast_status_value(tier)}
 
 

@@ -33,7 +33,7 @@ logger = logging.getLogger("run_agent")
 _TIER_LADDER: tuple[str | None, ...] = ("flex", None, "priority")
 
 # * Surfaces that must not escalate even if a caller passes enabled config.
-_DISABLED_PLATFORMS = frozenset({"cron", "subagent"})
+_DISABLED_PLATFORMS = frozenset({"cron", "subagent", "curator"})
 
 # * Distinguishes ``begin_turn()`` (keep current base) from ``begin_turn(None)``
 # (explicit default / omit-on-wire baseline after a model switch).
@@ -50,14 +50,29 @@ def _ladder_tier(value) -> str | None:
     return parsed if parsed in _WIRE_TIERS else None
 
 
-def _logical_base_tier(agent: Any):
-    """Configured base for this request: A1 ``logical_service_tier``, else constructor."""
-    try:
-        from agent.fast_mode import logical_service_tier
+def escalation_base_tier(agent: Any):
+    """Shared ladder base for bind, turn begin, switch, and rebase.
 
-        return logical_service_tier(agent)
+    Framework source (pin / per-model / global) wins; otherwise the user's
+    raw ``request_overrides.service_tier`` (flex/priority) is the starting
+    rung so enabling escalation does not strip it before any observation.
+    """
+    try:
+        from agent.fast_mode import logical_service_tier_source
+
+        mode, configured = logical_service_tier_source(agent)
+        if configured:
+            return mode
+        raw = parse_service_tier(
+            (getattr(agent, "request_overrides", None) or {}).get("service_tier")
+        )
+        return raw if raw in _WIRE_TIERS else None
     except Exception:
         return parse_service_tier(getattr(agent, "service_tier", None))
+
+
+def _logical_base_tier(agent: Any):
+    return escalation_base_tier(agent)
 
 
 class TtftObservation:
@@ -107,6 +122,9 @@ class ServiceTierEscalationState:
         # must not pick up a tier climbed from a not-yet-accepted sample.
         self.wire_locked = False
         self.wire_tier: str | None = self.base_tier
+        # * Actual first-attempt wire keys after bounded-window application
+        # (None = not yet captured this lock). Separate from the ladder rung.
+        self.request_wire_snapshot: dict | None = None
         self.pending_ttft: float | None = None
 
     @property
@@ -127,6 +145,7 @@ class ServiceTierEscalationState:
         self.last_ttft_seconds = None
         self.wire_locked = False
         self.wire_tier = self.base_tier
+        self.request_wire_snapshot = None
         self.pending_ttft = None
 
     def reset_for_model_switch(self, base_tier: str | None = None) -> None:
@@ -301,7 +320,8 @@ def rebase_escalation_runtime(agent: Any, new_base_tier: str | None) -> None:
     Unlocks the wire snapshot so the next logical request pins the rebased
     wire — a failover is a new model, not an outer-retry of the old one.
     Does not reset the ladder (unlike ``begin_turn`` / ``switch_model``).
-    On this branch *new_base_tier* is A1 ``logical_service_tier`` (no resync).
+    Production callers pass :func:`escalation_base_tier` (framework source,
+    else raw flex/priority) so a raw-tier ladder survives fallback/restore.
     """
     state = getattr(agent, "_service_tier_escalation", None)
     if not isinstance(state, ServiceTierEscalationState):
@@ -406,6 +426,9 @@ def begin_logical_request(agent: Any) -> None:
     First call locks ``wire_tier`` to the current effective tier. Further
     calls while still locked are outer-retries of the same request: the
     parked observation is discarded and the locked tier stays on the wire.
+    The first ``apply_escalation_to_overrides`` also snapshots the actual
+    wire keys (including an auto/cold window tier) so a retry restores
+    that attempt even if the window later expires.
     """
     state = getattr(agent, "_service_tier_escalation", None)
     if not isinstance(state, ServiceTierEscalationState):
@@ -415,6 +438,7 @@ def begin_logical_request(agent: Any) -> None:
         return
     state.wire_tier = state.effective_tier
     state.wire_locked = True
+    state.request_wire_snapshot = None
     state.pending_ttft = None
 
 
@@ -430,9 +454,21 @@ def accept_logical_request(agent: Any) -> None:
     pending = state.pending_ttft
     state.pending_ttft = None
     state.wire_locked = False
+    state.request_wire_snapshot = None
     if pending is None or not escalation_is_active(agent):
         return
     state.observe_ttft(pending, model=str(getattr(agent, "model", "") or ""))
+
+
+def _capture_request_wire_snapshot(state: ServiceTierEscalationState, overrides: dict) -> None:
+    """Record the first-attempt wire keys after bounded-window / ladder apply."""
+    if not state.wire_locked or state.request_wire_snapshot is not None:
+        return
+    from agent.fast_mode import TIER_WIRE_KEYS
+
+    state.request_wire_snapshot = {
+        key: overrides[key] for key in TIER_WIRE_KEYS if key in overrides
+    }
 
 
 def apply_escalation_to_overrides(agent: Any, overrides: dict) -> dict:
@@ -443,12 +479,22 @@ def apply_escalation_to_overrides(agent: Any, overrides: dict) -> dict:
     if not _openrouter_service_tier_route(agent):
         return overrides
 
+    if state.wire_locked and state.request_wire_snapshot is not None:
+        from agent.fast_mode import TIER_WIRE_KEYS
+
+        for key in TIER_WIRE_KEYS:
+            overrides.pop(key, None)
+        overrides.update(state.request_wire_snapshot)
+        return overrides
+
     target = state.wire_tier if state.wire_locked else state.effective_tier
     # * auto/cold windows own the per-request field until the ladder climbs.
     if target is None and _logical_base_tier(agent) in SERVICE_TIER_BOUNDED_VALUES:
+        _capture_request_wire_snapshot(state, overrides)
         return overrides
     present = parse_service_tier(overrides.get("service_tier"))
     if target is None and "service_tier" not in overrides and "speed" not in overrides:
+        _capture_request_wire_snapshot(state, overrides)
         return overrides
     if target is not None and present == target:
         if state.effective_tier != state.base_tier:
@@ -457,6 +503,7 @@ def apply_escalation_to_overrides(agent: Any, overrides: dict) -> dict:
                 _tier_label(target),
                 getattr(agent, "model", None),
             )
+        _capture_request_wire_snapshot(state, overrides)
         return overrides
 
     if target in ("flex", "priority"):
@@ -471,4 +518,5 @@ def apply_escalation_to_overrides(agent: Any, overrides: dict) -> dict:
             _tier_label(target),
             getattr(agent, "model", None),
         )
+    _capture_request_wire_snapshot(state, overrides)
     return overrides

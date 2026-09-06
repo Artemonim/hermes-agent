@@ -1965,6 +1965,11 @@ class CLICommandsMixin:
                     service_tier=self.service_tier,
                     request_overrides=turn_route.get("request_overrides"),
                     **{kw: getattr(self, attr) for kw, attr in _BG_PROVIDER_KWARGS.items()})
+                bg_agent._service_tier_session_pinned = bool(
+                    getattr(self, "_service_tier_session_pinned", False)
+                )
+                from hermes_cli.cli_agent_setup_mixin import _apply_framework_tier_bake
+                _apply_framework_tier_bake(bg_agent, turn_route.get("framework_baked_tier_keys"))
                 bg_agent._block_service_tier_escalation = True
                 # Silence raw spinner; route thinking through TUI widget when no foreground agent is active.
                 bg_agent._print_fn = lambda *_a, **_kw: None

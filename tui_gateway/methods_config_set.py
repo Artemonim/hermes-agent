@@ -154,12 +154,7 @@ _FAST_ON_TIERS = {"priority", "flex", "auto", "cold"}
 def _set_fast(rid, params, key, value, session):
     raw = _word(value)
     agent = session.get("agent") if session else None
-    if agent is not None:
-        current_tier = getattr(agent, "service_tier", None)
-    elif session is not None and session.get("create_service_tier_override") is not None:
-        current_tier = session["create_service_tier_override"] or None  # pre-build pin beats global
-    else:
-        current_tier = _load_service_tier()
+    current_tier = _effective_session_service_tier(agent, session)
     if raw == "status":
         return _kv(rid, key, _fast_status_value(current_tier))
     nv = _FAST_WORDS.get(raw, ("normal" if current_tier in _FAST_ON_TIERS else "fast") if raw in {"", "toggle"} else None)
@@ -206,6 +201,9 @@ def _set_fast(rid, params, key, value, session):
                              if k not in ("service_tier", "speed")}
         agent.request_overrides = {**current_overrides, **(overrides or {})}
         agent._service_tier_session_pinned = session is not None
+        from agent.fast_mode import set_framework_baked_tier_keys
+
+        set_framework_baked_tier_keys(agent, overrides)
         _persist_live_session_runtime(session)
         _emit_session_info(params.get("session_id", ""), session)
     return _kv(rid, key, nv)
