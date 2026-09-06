@@ -330,3 +330,20 @@ class TestUpdateProgressHeartbeat:
         out = capsys.readouterr().out
         assert "still (" in out
 
+    def test_unwrapped_stdout_still_grows_update_log(self, capsys):
+        """Unwrapped stdout must still grow logs/update.log (Desktop watchdog)."""
+        import time
+
+        from hermes_constants import get_hermes_home
+        from hermes_cli.update_cmd import _update_progress_heartbeat
+
+        log_path = get_hermes_home() / "logs" / "update.log"
+        before = log_path.read_text(encoding="utf-8") if log_path.exists() else ""
+        with _update_progress_heartbeat(
+            "still ({elapsed}s)", interval_seconds=0.12
+        ):
+            time.sleep(0.4)
+        after = log_path.read_text(encoding="utf-8")
+        assert "still (" in after[len(before):]
+        assert "still (" in capsys.readouterr().out
+

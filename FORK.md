@@ -764,7 +764,13 @@ fork only if a change needs a discussion thread.
 
 - **Status:** active (fork-local). Follow-up 2026-08-18 keeps apply-path
   fetches at `--depth 1` on shallow checkouts and covers that with tests
-  that stay off the npm/backup path.
+  that stay off the npm/backup path. Follow-up 2026-09-06: restored two
+  update-progress semantics the #102117 merge (`dac26201`) dropped —
+  gateway `_watch_update_progress` default timeout back to 3600s with the
+  "60 minutes" message (`gateway/run_notifications.py`), and the
+  `_update_progress_heartbeat` `_log_only_write` tick for unwrapped stdout
+  (`hermes_cli/update_cmd.py`); both match upstream PR
+  [#101850](https://github.com/NousResearch/hermes-agent/pull/101850).
 - **Summary:** two update-pipeline patches for this checkout. (1)
   `updates.branch` in `config.yaml` (default `main`) is the target when
   `hermes update` omits `--branch`; explicit `--branch` still wins;

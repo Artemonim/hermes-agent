@@ -1392,8 +1392,9 @@ def _update_progress_heartbeat(message: str, *, interval_seconds: int = 30):
     """Print a flushed elapsed-time line so idle watchdogs see progress.
 
     Windows Desktop's hand-off kills ``hermes update`` after 600s of
-    silence on both stdout and ``logs/update.log``. *message* must contain
-    ``{elapsed}``.
+    silence on both stdout and ``logs/update.log``. ``npm --progress=false``
+    and captured Electron builds are routinely quiet that long. *message*
+    must contain ``{elapsed}``.
     """
     done = threading.Event()
     start = _time.time()
@@ -1401,7 +1402,13 @@ def _update_progress_heartbeat(message: str, *, interval_seconds: int = 30):
     def _beat() -> None:
         while not done.wait(interval_seconds):
             elapsed = int(_time.time() - start)
-            print(message.format(elapsed=elapsed), flush=True)
+            line = message.format(elapsed=elapsed)
+            print(line, flush=True)
+            # The hangup tee mirrors print() into update.log. When stdout
+            # is not wrapped (gateway mode today, wrap-setup failure), still
+            # tick the file the Windows Desktop idle watchdog watches.
+            if getattr(sys.stdout, "_log", None) is None:
+                _log_only_write(line)
 
     t = threading.Thread(target=_beat, daemon=True, name="update-heartbeat")
     t.start()
