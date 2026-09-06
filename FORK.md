@@ -194,7 +194,13 @@ fork only if a change needs a discussion thread.
   `session_id`-based sticky routing (which Hermes already sends via the
   OpenRouter profile's `build_extra_body`) but explicitly disables it under
   a manual `provider.order`; upstream issue #24493 / PR #24495 cover only
-  the per-model schema, not client-side pinning.
+  the per-model schema, not client-side pinning. Follow-up 2026-09-06:
+  extracted as the upstream-bound branch
+  `feat/openrouter-sticky-provider-order` (1 commit off current main),
+  redesigned chokepoint-native on #104159: bind/TTL once per logical
+  request, pin applied read-only in `_provider_preferences_for_agent`, no
+  constructor plumbing; config re-read per logical request; speed-tier
+  astra slugs gated off. PR pending.
 - **Merge risk:** post-#102117 the rotate-after-`classify_api_error` hook
   lives in `agent/turn_api_error.py`; retry-budget / fallback gates remain
   in `agent/conversation_loop.py`. Re-run
@@ -301,6 +307,13 @@ fork only if a change needs a discussion thread.
   [#78097](https://github.com/NousResearch/hermes-agent/issues/78097) is
   per-provider and open. TTFT escalation has no upstream counterpart.
   teknium1 asked for a focused PR if the tier half is pursued.
+  Follow-up 2026-09-06: extracted as the upstream-bound branch
+  `feat/openrouter-service-tiers` (3 commits off current main: tiers +
+  per-model overrides + `/fast`, TTFT escalation, principal-review
+  hardening). Redesigned onto main's seams: request-time per-model tier
+  resolution in `agent/fast_mode.py` (no resync plumbing), tier-key
+  provenance (`_framework_baked_tier_keys`) so raw
+  `request_overrides` pass through. PR pending.
 - **Merge risk:** overlay+sticky live together in
   `_provider_preferences_for_agent` — take main's overlay, keep sticky
   after it. `agent/conversation_loop.py` is high-churn — after each
