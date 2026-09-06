@@ -8,6 +8,7 @@ from unittest.mock import ANY, patch
 import pytest
 
 from hermes_cli.main import cmd_update, PROJECT_ROOT, _resolve_update_branch
+from hermes_cli import main as hermes_main
 from hermes_cli import main_web_build
 from hermes_cli import main_install_repair
 from hermes_cli import update_cmd
@@ -118,12 +119,43 @@ def _patch_gateway_discovery():
     the phase is surfaced (#78574: an aborted restart now fails the update),
     an unmocked ``find_gateway_pids`` on a box with a live gateway reaches the
     conftest live-system guard and turns into a spurious ``sys.exit(1)``.
-    Discovery returning nothing makes the phase a clean no-op for every test
-    in this module (none of them assert on gateway restarts).
+    Discovery returning nothing is enough on POSIX; on Windows
+    ``_pause_windows_gateways_for_update`` still cold-starts when
+    ``is_installed()`` is true. These tests mock ``subprocess.run`` for git,
+    so ``schtasks /Query`` also returns 0 and looks installed — then
+    ``find_gateway_pids`` stays mocked-empty, the cold-start wait never
+    sees the spawned PID, and fleet verify ``sys.exit(1)``. Stub the
+    pause/resume/dashboard seams the same way sibling update tests do
+    (``test_update_head_moved_gate``, ``test_update_parked_branch_guard``).
+    None of the tests here assert on gateway restarts.
     """
     with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
-         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]):
+         patch("hermes_cli.gateway.find_profile_gateway_processes", return_value=[]), \
+         patch.object(hermes_main, "_pause_windows_gateways_for_update", lambda: None), \
+         patch.object(
+             hermes_main, "_resume_windows_gateways_after_update", lambda *a, **k: None
+         ), \
+         patch.object(hermes_main, "_purge_stale_hermes_modules", lambda *a, **kw: None), \
+         patch.object(
+             hermes_main, "_fleet_probe_expected_runtimes", lambda *a, **kw: False
+         ), \
+         patch.object(
+             hermes_main, "_restore_active_tool_dependencies", lambda *a, **kw: None
+         ), \
+         patch.object(
+             update_cmd, "_finish_dashboard_update_cleanup", lambda *a, **k: None
+         ), \
+         patch.object(
+             update_cmd, "_apply_pending_fleet_restart_catchup", lambda *a, **k: None
+         ), \
+         patch.object(
+             update_cmd, "_clear_windows_venv_holders_or_exit", lambda *a, **k: None
+         ), \
+         patch.object(hermes_main, "_detect_venv_python_processes", lambda: []), \
+         patch("hermes_cli.update_inventory.collect_runtime_inventory", return_value=None), \
+         patch("hermes_cli.update_inventory.report_unaccounted_runtimes", return_value=False), \
+         patch("hermes_cli.update_receipt.collect_fleet_versions", return_value=[]):
         yield
 
 

@@ -797,6 +797,13 @@ fork only if a change needs a discussion thread.
   `_update_progress_heartbeat` `_log_only_write` tick for unwrapped stdout
   (`hermes_cli/update_cmd.py`); both match upstream PR
   [#101850](https://github.com/NousResearch/hermes-agent/pull/101850).
+  Follow-up 2026-09-06 (test hygiene): completed the autouse
+  `_patch_gateway_discovery` fixtures in `tests/hermes_cli/test_cmd_update.py`
+  and `test_update_autostash.py` with the pause/resume + fleet/dashboard stubs
+  sibling update test files already had — on Windows the git-mocked
+  `subprocess.run` answered `schtasks /Query` with exit 0, so update tests
+  cold-started real gateways and failed closed. Pre-existing gap, not merge
+  damage; 23 tests flipped green.
 - **Summary:** two update-pipeline patches for this checkout. (1)
   `updates.branch` in `config.yaml` (default `main`) is the target when
   `hermes update` omits `--branch`; explicit `--branch` still wins;
