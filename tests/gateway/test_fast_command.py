@@ -123,10 +123,10 @@ def test_turn_route_injects_priority_processing_without_changing_runtime():
     assert route["runtime"]["api_mode"] == "chat_completions"
     assert route["request_overrides"] == {"service_tier": "priority"}
 
-    # Proxied routes never receive the param (OpenRouter strips it / others 400).
+    # Proxied routes never receive first-party fast params; OpenRouter does.
     runtime_kwargs.update(base_url="https://openrouter.ai/api/v1", provider="openrouter")
     route = gateway_run.GatewayRunner._resolve_turn_agent_config(runner, "hi", "gpt-5.4", runtime_kwargs)
-    assert route["request_overrides"] == {}
+    assert route["request_overrides"] == {"service_tier": "priority"}
 
 
 @pytest.mark.asyncio
@@ -173,5 +173,59 @@ async def test_session_fast_override_beats_config_default(monkeypatch, tmp_path)
     assert runner._resolve_session_service_tier(session_key=session_key) is None
     # A different session still gets the config default.
     assert runner._resolve_session_service_tier(session_key="other-session") == "priority"
+
+
+@pytest.mark.asyncio
+async def test_handle_fast_flex_is_session_scoped(monkeypatch, tmp_path):
+    runner = _make_runner()
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "openai/gpt-5")
+
+    event = _make_event("/fast flex")
+    response = await runner._handle_fast_command(event)
+    session_key = runner._session_key_for_source(event.source)
+
+    assert "FLEX" in response
+    assert runner._service_tier == "flex"
+    assert runner._resolve_session_service_tier(session_key=session_key) == "flex"
+    assert not (tmp_path / "config.yaml").exists()
+
+
+@pytest.mark.asyncio
+async def test_fast_status_ungated_for_session_model(monkeypatch, tmp_path):
+    """Status uses the session-effective model and does not capability-gate."""
+    runner = _make_runner()
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_load_gateway_runtime_config", lambda: {"agent": {"service_tier": "flex"}})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "claude-sonnet-4-6")
+
+    event = _make_event("/fast status")
+    runner._try_send_choice_picker = AsyncMock(return_value=False)
+    response = await runner._handle_fast_command(event)
+    assert "not_supported" not in (response or "")
+    assert "flex" in response.lower()
+
+
+@pytest.mark.asyncio
+async def test_fast_switch_uses_session_openrouter_route(monkeypatch, tmp_path):
+    runner = _make_runner()
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {
+        "model": {"provider": "anthropic", "default": "claude-sonnet-4-6"},
+    })
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "claude-sonnet-4-6")
+
+    event = _make_event("/fast fast")
+    session_key = runner._session_key_for_source(event.source)
+    runner._session_model_overrides[session_key] = {
+        "model": "meta-llama/llama-3.1-8b-instruct",
+        "provider": "openrouter",
+        "base_url": "https://openrouter.ai/api/v1",
+    }
+    response = await runner._handle_fast_command(event)
+    assert "FAST" in response
+    assert runner._service_tier == "priority"
 
 

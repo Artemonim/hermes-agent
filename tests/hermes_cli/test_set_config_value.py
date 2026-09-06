@@ -547,6 +547,7 @@ class TestValidateConfigKey:
         "platforms.discord.enabled",
         "gateway.platforms.my_platform.extra.token",
         "approvals.mode",
+        "agent.service_tier_overrides",
     ])
     def test_known_keys_pass(self, key):
         from hermes_cli.config import _validate_config_key

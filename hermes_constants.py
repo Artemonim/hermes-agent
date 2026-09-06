@@ -889,6 +889,44 @@ def parse_reasoning_effort(effort) -> dict | None:
     return None
 
 
+SERVICE_TIER_DISABLED_VALUES = frozenset(
+    {"normal", "default", "standard", "off", "none"}
+)
+# * auto/cold are bounded fast-mode windows on agent.service_tier, not OpenRouter wire values.
+SERVICE_TIER_BOUNDED_VALUES = frozenset({"auto", "cold"})
+_SERVICE_TIER_ALIASES = {
+    "fast": "priority",
+    "on": "priority",
+    "priority": "priority",
+    "flex": "flex",
+    "auto": "auto",
+    "cold": "cold",
+}
+
+
+def parse_service_tier(value) -> str | None:
+    """Normalize a configured service-tier preference.
+
+    Wire values: ``priority`` (aliases ``fast`` / ``on``) and OpenRouter
+    ``flex``. Bounded fast-mode windows: ``auto`` and ``cold`` — stored on
+    ``agent.service_tier`` and applied per request by ``agent.fast_mode``,
+    not sent as OpenRouter ``service_tier``. Empty, normal, and unrecognized
+    values return ``None`` so callers can keep their current default or
+    report a configuration warning.
+    """
+    normalized = str(value or "").strip().lower()
+    if not normalized or normalized in SERVICE_TIER_DISABLED_VALUES:
+        return None
+    return _SERVICE_TIER_ALIASES.get(normalized)
+
+
+def service_tier_status_label(tier: str | None) -> str:
+    """Map a canonical ``service_tier`` to the ``/fast`` status word."""
+    if tier == "priority":
+        return "fast"
+    return tier or "normal"
+
+
 def _canonical_model_variants(model: str) -> list[str]:
     """Spelling variants for tolerant override matching, exact first, deduped in order.
 
@@ -952,6 +990,63 @@ def resolve_per_model_provider_routing(model: str, models: dict | None) -> dict:
         if isinstance(entry, dict):
             return entry
     return {}
+
+
+def resolve_service_tier_for_model(agent_cfg, model: str = "", *, fallback=None) -> str | None:
+    """Resolve effective service tier: per-model override, else global, else *fallback*.
+
+    Session pins are applied by callers *before* this function. Values go
+    through :func:`parse_service_tier` (``flex`` / ``priority`` / ``auto`` /
+    ``cold``; ``normal`` / ``default`` / empty → ``None``). An invalid
+    per-model value logs a warning and falls back to ``agent.service_tier``;
+    an invalid global value logs a warning and returns ``None``. When the
+    global key is unset, *fallback* (typically the constructor
+    ``agent.service_tier``) is used so programmatic agents keep working
+    without a config.yaml.
+    """
+    if not isinstance(agent_cfg, dict):
+        agent_cfg = {}
+
+    overrides = agent_cfg.get("service_tier_overrides")
+    matched = False
+    raw_override = None
+    model_key = str(model or "")
+    if isinstance(overrides, dict) and model_key:
+        for variant in _canonical_model_variants(model_key):
+            if variant in overrides:
+                matched = True
+                raw_override = overrides[variant]
+                break
+    if matched:
+        parsed_override = parse_service_tier(raw_override)
+        if parsed_override is not None:
+            return parsed_override
+        normalized = str(raw_override or "").strip().lower()
+        if not normalized or normalized in SERVICE_TIER_DISABLED_VALUES:
+            return None
+        import logging
+        logging.getLogger(__name__).warning(
+            "Unknown service_tier override '%s' for model '%s', "
+            "falling back to global agent.service_tier, then the constructor fallback",
+            raw_override,
+            model_key,
+        )
+
+    raw_global = agent_cfg.get("service_tier", "")
+    normalized_global = str(raw_global or "").strip().lower()
+    if not normalized_global:
+        return parse_service_tier(fallback)
+    parsed_global = parse_service_tier(raw_global)
+    if parsed_global is not None:
+        return parsed_global
+    if normalized_global in SERVICE_TIER_DISABLED_VALUES:
+        return None
+    import logging
+    logging.getLogger(__name__).warning(
+        "Unknown service_tier '%s', ignoring",
+        raw_global,
+    )
+    return None
 
 
 def resolve_reasoning_config(cfg: dict | None, model: str = "") -> dict | None:

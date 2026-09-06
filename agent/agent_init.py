@@ -40,7 +40,7 @@ from agent.tool_guardrails import (
 from hermes_cli.config import cfg_get
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.timeouts import get_provider_request_timeout
-from hermes_constants import get_hermes_home
+from hermes_constants import get_hermes_home, parse_service_tier
 from utils import base_url_host_matches, is_truthy_value
 
 # Same logger name as run_agent so caplog/patches on "run_agent" see our records.
@@ -2264,6 +2264,10 @@ def init_agent(
     # reasoning_content echo opt-in; switch_model / fallback / restore keep it in sync.
     agent._reasoning_echo_flag = agent._read_reasoning_echo_from_config()
     agent.request_overrides = dict(request_overrides or {})
+    agent.service_tier = parse_service_tier(getattr(agent, "service_tier", None))
+    # * Surfaces that apply a session /fast set this True after construction. Default-off so
+    # delegated children never inherit a parent session pin.
+    agent._service_tier_session_pinned = False
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False
 

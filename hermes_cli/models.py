@@ -963,13 +963,30 @@ def _is_anthropic_fast_model(model_id: Optional[str]) -> bool:
     return any(v in base for v in ("opus-4-8", "opus-4.8", "opus-5"))
 
 
+def _is_openrouter_service_tier_route(
+    provider: Optional[str], base_url: Optional[str]
+) -> bool:
+    """Return whether a request route uses OpenRouter's service-tier API."""
+    provider_name = str(provider or "").strip()
+    if provider_name and normalize_provider(provider_name) == "openrouter":
+        return True
+    if not base_url:
+        return False
+    from utils import base_url_host_matches
+
+    return base_url_host_matches(base_url, "openrouter.ai")
+
+
 def _fast_mode_route_supported(
     model_id: Optional[str], provider: Optional[str], base_url: Optional[str]) -> bool:
-    """Only the first-party endpoint that bills for fast mode may receive its params."""
+    """OpenRouter accepts ``service_tier`` for any catalog model; first-party fast params stay
+    on the billing endpoint that actually supports them."""
     from urllib.parse import urlparse
 
     from agent.model_metadata import is_grok_46_family
 
+    if _is_openrouter_service_tier_route(provider, base_url):
+        return True
     if _is_anthropic_fast_model(model_id):
         allowed = {"anthropic": "api.anthropic.com"}
     elif is_grok_46_family(str(model_id or "")):
@@ -986,14 +1003,50 @@ def resolve_fast_mode_overrides(
     model_id: Optional[str], *, provider: Optional[str] = None, base_url: Optional[str] = None
 ) -> dict[str, Any] | None:
     """Fast/priority request_overrides — ``{"speed": "fast"}`` (Anthropic Fast Mode) or
-    ``{"service_tier": "priority"}`` (OpenAI / xAI Priority Processing) — or None if unsupported.
-    With ``provider``/``base_url`` the route is gated too (``_fast_mode_route_supported``) so proxies
-    never see the params. Single fast-mode gate for ``/fast`` and ``agent.fast_mode`` windows."""
+    ``{"service_tier": "priority"}`` (OpenAI / xAI Priority Processing, or any OpenRouter
+    catalog model) — or None if unsupported.
+    With ``provider``/``base_url`` the route is gated too (``_fast_mode_route_supported``) so
+    non-OpenRouter proxies never see the params. Single fast-mode gate for ``/fast`` and
+    ``agent.fast_mode`` windows."""
+    if _is_openrouter_service_tier_route(provider, base_url):
+        return {"service_tier": "priority"}
     if not model_supports_fast_mode(model_id):
         return None
     if (provider or base_url) and not _fast_mode_route_supported(model_id, provider, base_url):
         return None
     return {"speed": "fast"} if _is_anthropic_fast_model(model_id) else {"service_tier": "priority"}
+
+
+def resolve_service_tier_overrides(
+    model_id: Optional[str],
+    service_tier: Optional[str],
+    *,
+    provider: Optional[str] = None,
+    base_url: Optional[str] = None,
+) -> dict[str, Any] | None:
+    """Return request overrides for a normalized service-tier preference.
+
+    OpenRouter accepts both ``flex`` and ``priority`` as top-level request
+    fields for every catalog model. Elsewhere, ``flex`` is warned and ignored;
+    ``priority`` retains the existing model-aware /fast mapping: OpenAI models
+    receive ``service_tier`` while supported Anthropic models receive ``speed``.
+    """
+    from hermes_constants import parse_service_tier
+
+    tier = parse_service_tier(service_tier)
+    if tier == "flex":
+        if _is_openrouter_service_tier_route(provider, base_url):
+            return {"service_tier": "flex"}
+        logger.warning(
+            "service_tier 'flex' is OpenRouter-only; ignoring for %s",
+            provider or base_url or "this route",
+        )
+        return None
+    if tier == "priority" and _is_openrouter_service_tier_route(provider, base_url):
+        return {"service_tier": "priority"}
+    if tier == "priority":
+        return resolve_fast_mode_overrides(model_id, provider=provider, base_url=base_url)
+    return None
 
 
 def _first_exchangeable_copilot_token(raw_tokens) -> str:

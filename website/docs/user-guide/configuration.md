@@ -1739,24 +1739,34 @@ The override applies automatically everywhere: CLI startup, messaging gateway, D
 
 ## Fast Mode
 
-Fast mode asks the provider for faster output at a premium price: OpenAI [Priority Processing](https://openai.com/api-priority-processing/) (`service_tier: priority`), xAI Priority Processing on Grok 4.6, and Anthropic [Fast Mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode) (`speed: fast`, Opus 4.8 / Opus 5 only). It is **off by default**.
+Fast mode asks the provider for faster (or cheaper) output via a request-level service tier. It is **off by default**.
+
+- **First-party:** OpenAI [Priority Processing](https://openai.com/api-priority-processing/) (`service_tier: priority`), xAI Priority Processing on Grok 4.6, and Anthropic [Fast Mode](https://platform.claude.com/docs/en/build-with-claude/fast-mode) (`speed: fast`, Opus 4.8 / Opus 5 only). Fast params are only sent to the first-party endpoint that supports them (`api.openai.com` / Codex subscription, `api.anthropic.com`, `api.x.ai`). Nous Portal, Copilot, Azure, Bedrock, and custom `base_url` routes never receive them.
+- **OpenRouter:** any catalog model may carry top-level `service_tier: flex` (cheaper, slower queue) or `service_tier: priority`. Flex on a non-OpenRouter route is warned and ignored.
 
 ```yaml
 agent:
-  service_tier: ""          # "" / normal | fast | auto | cold
+  service_tier: ""          # "" / normal | fast | flex | auto | cold
   fast_auto_seconds: 60     # window for auto / cold
+  # Per-model overlay (spelling-tolerant). Request-time; no /model resync needed.
+  # service_tier_overrides:
+  #   "openai/gpt-5": "flex"
+  service_tier_overrides: {}
 ```
 
 | Mode | When fast params are sent | Use it for |
 |------|---------------------------|------------|
 | `normal` (default, `""`) | Never | Cheapest; standard latency |
-| `fast` | Every request | Long interactive sessions where you always want speed |
+| `fast` | Every request (`priority`, or Anthropic `speed: fast`) | Long interactive sessions where you always want speed |
+| `flex` | Every request on OpenRouter (`service_tier: flex`) | Lower-cost OpenRouter queue |
 | `auto` | Requests in the first `fast_auto_seconds` of **every** turn | Snappy first reply; long tool loops fall back to standard pricing |
 | `cold` | Same window, but only on the **first turn** of a session (no prior history) | Fast onboarding reply, standard pricing afterwards |
 
-`/fast normal|fast|auto|cold` switches the mode for the session; add `--global` to persist to `config.yaml`. `/fast` alone shows the current mode.
+**Precedence:** session `/fast` pin (including `/fast normal`) **>** `agent.service_tier_overrides` for the current model **>** global `agent.service_tier`. An explicit `/fast` choice survives `/model` and clears only on session reset. Because resolution is per request, `/model` switches, provider fallback/restore, cron agents, and delegated children on another model all get the overlay for *their* model — children never inherit a parent session pin.
 
-**Cost note:** both providers bill fast requests at a multiplier on standard rates (Anthropic: $10 / $50 per MTok in/out on Opus 4.8 and Opus 5), stacking with prompt-cache pricing. `auto`/`cold` bound that premium to the window only. Fast params are only sent to the first-party endpoint that supports them (`api.openai.com` / Codex subscription, `api.anthropic.com`, `api.x.ai`); OpenRouter, Nous Portal, Copilot, Azure, Bedrock, and custom `base_url` routes never receive them in any mode. Only the per-request parameter changes between requests — the system prompt, tools, and messages stay byte-identical, so the prompt cache survives the window boundary.
+`/fast normal|fast|flex|auto|cold` switches the mode for the session; add `--global` to persist to `config.yaml`. `/fast` (and `/fast status`) reports the **effective** tier for the session's current model without a capability gate; only switching **to** `fast` stays route-gated (OpenRouter or a first-party fast model).
+
+**Cost note:** first-party fast requests bill at a multiplier on standard rates (Anthropic: $10 / $50 per MTok in/out on Opus 4.8 and Opus 5), stacking with prompt-cache pricing. OpenRouter flex is the cheaper slower queue; priority is the faster one. `auto`/`cold` bound the first-party premium to the window only. Only the per-request parameter changes between requests — the system prompt, tools, and messages stay byte-identical, so the prompt cache survives the window boundary. See also [Provider Routing](features/provider-routing.md) for OpenRouter `extra_body.provider` prefs (separate from service tier).
 
 ## Tool-Use Enforcement
 

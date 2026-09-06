@@ -5646,10 +5646,23 @@ def _effective_aux_timeout(task: str, timeout: Optional[float]) -> float:
 def _get_task_extra_body(task: str) -> Dict[str, Any]:
     """Shallow copy of ``auxiliary.<task>.extra_body`` with ``reasoning_effort`` folded into
     ``reasoning`` unless one is configured (more specific wins). MoA tasks are excluded: their
-    reasoning depth is per-slot in the preset."""
+    reasoning depth is per-slot in the preset. ``auxiliary.<task>.service_tier`` is a shorthand
+    for the top-level service-tier request field; explicit ``extra_body.service_tier`` wins."""
     task_config = _get_auxiliary_task_config(task)
     raw = task_config.get("extra_body")
     result = dict(raw) if isinstance(raw, dict) else {}
+    if "service_tier" not in result:
+        configured_tier = task_config.get("service_tier")
+        if configured_tier not in (None, ""):
+            from hermes_constants import parse_service_tier
+            tier = parse_service_tier(configured_tier)
+            if tier in {"flex", "priority"}:
+                result["service_tier"] = tier
+            else:
+                logger.warning(
+                    "auxiliary.%s.service_tier %r is not supported (flex or priority) — ignoring",
+                    task, configured_tier,
+                )
     if "reasoning" in result:
         return result
     effort = task_config.get("reasoning_effort")
@@ -5957,7 +5970,20 @@ def _build_call_kwargs(
     projection = _project_provider_profile(provider, provider_norm, model, effective_base, reasoning_config)
     kwargs.update(projection.top_level)
     if merged_extra := _merge_aux_extra_body(extra_body, projection, reasoning_config, provider_norm):
-        kwargs["extra_body"] = merged_extra
+        # * Lift service_tier to a top-level kwarg (OpenRouter passthrough) and drop it from
+        # extra_body so first-party routes never see an unsupported extra_body key.
+        mapped = None
+        raw_tier = merged_extra.get("service_tier")
+        if raw_tier:
+            from hermes_cli.models import resolve_service_tier_overrides
+            mapped = resolve_service_tier_overrides(
+                model, raw_tier, provider=provider, base_url=effective_base,
+            )
+            merged_extra.pop("service_tier", None)
+        if mapped:
+            kwargs.update(mapped)
+        if merged_extra:
+            kwargs["extra_body"] = merged_extra
     # Anthropic Messages adapters take reasoning via a private kwarg that plain OpenAI SDK clients
     # would reject; Portal Claude is dual-wire, so include it only when the catalog id selects
     # /v1/messages.

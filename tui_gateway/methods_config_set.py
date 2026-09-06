@@ -147,7 +147,8 @@ def _set_model(rid, params, key, value, session):
 
 
 _FAST_WORDS = {"fast": "fast", "on": "fast", "normal": "normal", "off": "normal",
-               "auto": "auto", "cold": "cold"}
+               "auto": "auto", "cold": "cold", "flex": "flex", "priority": "fast"}
+_FAST_ON_TIERS = {"priority", "flex", "auto", "cold"}
 
 
 def _set_fast(rid, params, key, value, session):
@@ -160,24 +161,39 @@ def _set_fast(rid, params, key, value, session):
     else:
         current_tier = _load_service_tier()
     if raw == "status":
-        return _kv(rid, key, {"priority": "fast", None: "normal"}.get(current_tier, current_tier))
-    nv = _FAST_WORDS.get(raw, ("normal" if current_tier == "priority" else "fast") if raw in {"", "toggle"} else None)
+        return _kv(rid, key, _fast_status_value(current_tier))
+    nv = _FAST_WORDS.get(raw, ("normal" if current_tier in _FAST_ON_TIERS else "fast") if raw in {"", "toggle"} else None)
     if nv is None:
         return _err(rid, 4002, f"unknown fast mode: {value}")
     overrides = None
-    if nv == "fast":
-        from hermes_cli.models import resolve_fast_mode_overrides
+    if nv in {"fast", "flex"}:
+        from hermes_cli.models import resolve_fast_mode_overrides, resolve_service_tier_overrides
+        session_override = (session or {}).get("model_override") or {}
+        if not isinstance(session_override, dict):
+            session_override = {}
         if agent is not None:
             target_model = getattr(agent, "model", None)
+            target_provider = getattr(agent, "provider", None)
+            target_base_url = getattr(agent, "base_url", None)
         else:  # a pre-build session may carry a picked model (desktop draft): validate against THAT
-            session_override = (session or {}).get("model_override") or {}
-            target_model = (isinstance(session_override, dict) and session_override.get("model")) or _resolve_model()
-        if not target_model:
-            return _err(rid, 4002, "fast mode is not available without a selected model")
-        overrides = resolve_fast_mode_overrides(target_model, provider=getattr(agent, "provider", None),
-                                                base_url=getattr(agent, "base_url", None))
-        if overrides is None:
-            return _err(rid, 4002, "fast mode is not available for this model")
+            target_model = session_override.get("model") or _resolve_model()
+            target_provider = session_override.get("provider")
+            target_base_url = session_override.get("base_url")
+            cfg_model = _load_cfg().get("model")
+            if isinstance(cfg_model, dict):
+                target_provider = target_provider or cfg_model.get("provider")
+                target_base_url = target_base_url or cfg_model.get("base_url")
+        if nv == "fast":
+            if not target_model:
+                return _err(rid, 4002, "fast mode is not available without a selected model")
+            overrides = resolve_fast_mode_overrides(
+                target_model, provider=target_provider, base_url=target_base_url)
+            if overrides is None:
+                return _err(rid, 4002, "fast mode is not available for this model")
+        else:
+            overrides = resolve_service_tier_overrides(
+                target_model, "flex", provider=target_provider, base_url=target_base_url,
+            ) or {}
     if session is not None:
         # Session-scoped like `reasoning` (global = `--global` / Settings → Model): writing config.yaml
         # here flipped fast mode for every surface. The create override survives rebuilds; "" pins normal.
@@ -189,6 +205,7 @@ def _set_fast(rid, params, key, value, session):
         current_overrides = {k: v for k, v in (getattr(agent, "request_overrides", {}) or {}).items()
                              if k not in ("service_tier", "speed")}
         agent.request_overrides = {**current_overrides, **(overrides or {})}
+        agent._service_tier_session_pinned = session is not None
         _persist_live_session_runtime(session)
         _emit_session_info(params.get("session_id", ""), session)
     return _kv(rid, key, nv)

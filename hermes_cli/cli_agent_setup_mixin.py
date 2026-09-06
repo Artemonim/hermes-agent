@@ -371,16 +371,17 @@ class CLIAgentSetupMixin:
 
     def _resolve_turn_agent_config(self, user_message: str) -> dict:
         """Effective model/runtime config for one turn — always the session's primary
-        provider. With `/fast` on (service_tier == "priority") attach request_overrides;
-        auto/cold tiers are applied per request by agent.fast_mode instead."""
-        from hermes_cli.models import resolve_fast_mode_overrides
+        provider. Static ``priority``/``flex`` attach request_overrides; auto/cold
+        tiers are applied per request by agent.fast_mode instead."""
+        from hermes_cli.models import resolve_service_tier_overrides
         runtime = _current_runtime(self)
         route = {"model": self.model, "runtime": runtime, "signature": _route_signature(self.model, runtime)}
         overrides = None
-        if getattr(self, "service_tier", None) == "priority":
+        if getattr(self, "service_tier", None) in {"priority", "flex"}:
             try:
-                overrides = resolve_fast_mode_overrides(
-                    route["model"], provider=runtime["provider"], base_url=runtime["base_url"])
+                overrides = resolve_service_tier_overrides(
+                    route["model"], self.service_tier,
+                    provider=runtime["provider"], base_url=runtime["base_url"])
             except Exception:
                 pass
         route["request_overrides"] = overrides
@@ -546,6 +547,9 @@ class CLIAgentSetupMixin:
                 tool_gen_callback=self._on_tool_gen_start if self.streaming_enabled else None,
                 notice_callback=self._on_notice, notice_clear_callback=self._on_notice_clear,
                 reaction_callback=self._on_reaction)
+            self.agent._service_tier_session_pinned = bool(
+                getattr(self, "_service_tier_session_pinned", False)
+            )
             # Reference for atexit memory-provider shutdown: ``_run_cleanup`` in cli.py
             # reads ``cli._active_agent_ref``, so this MUST write the ``cli`` module's
             # global — a ``global`` statement here would bind this module's namespace.

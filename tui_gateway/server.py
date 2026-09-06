@@ -1712,12 +1712,18 @@ def _load_reasoning_config(model: str = "") -> dict | None:
     return resolve_reasoning_config(_load_cfg(), model)
 
 
-_SERVICE_TIER_ALIASES = {"fast": "priority", "priority": "priority", "on": "priority", "auto": "auto", "cold": "cold"}
-
-
 def _load_service_tier() -> str | None:
-    raw = str((_load_cfg().get("agent") or {}).get("service_tier", "") or "").strip().lower()
-    return _SERVICE_TIER_ALIASES.get(raw)
+    from hermes_constants import parse_service_tier
+
+    raw = str((_load_cfg().get("agent") or {}).get("service_tier", "") or "").strip()
+    return parse_service_tier(raw)
+
+
+def _fast_status_value(tier) -> str:
+    """Map a canonical service_tier to the ``config.get/set fast`` status label."""
+    from hermes_constants import service_tier_status_label
+
+    return service_tier_status_label(tier if tier not in ("",) else None)
 
 
 def _load_provider_routing() -> dict:
@@ -2301,6 +2307,7 @@ def _make_agent(
         with _sessions_lock:
             context_cwd_is_launch_artifact = _context_cwd_is_launch_artifact(_sessions.get(sid))
     agent._context_cwd_is_launch_artifact = bool(context_cwd_is_launch_artifact)
+    agent._service_tier_session_pinned = service_tier_override is not None
     return agent
 
 

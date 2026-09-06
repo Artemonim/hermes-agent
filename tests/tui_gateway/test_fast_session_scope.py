@@ -107,6 +107,39 @@ class TestConfigSetFastSessionScope:
         assert resp["result"]["value"] == "normal"
         write_key.assert_called_once_with("agent.service_tier", "normal")
 
+    def test_session_flex_pins_without_global_write(self) -> None:
+        agent = _agent()
+        agent.provider = "openrouter"
+        agent.base_url = "https://openrouter.ai/api/v1"
+        session = {"session_key": "k-flex", "agent": agent}
+        with patch.dict(server._sessions, {"s-flex": session}, clear=False), \
+                patch.object(server, "_write_config_key") as write_key, \
+                patch.object(server, "_persist_live_session_runtime"), \
+                patch.object(server, "_emit"):
+            resp = _set({"key": "fast", "session_id": "s-flex", "value": "flex"})
+        assert resp["result"]["value"] == "flex"
+        assert agent.service_tier == "flex"
+        assert agent._service_tier_session_pinned is True
+        assert session["create_service_tier_override"] == "flex"
+        write_key.assert_not_called()
+
+    def test_openrouter_prebuild_fast_without_first_party_model(self) -> None:
+        session = {
+            "session_key": "k-or",
+            "agent": None,
+            "model_override": {
+                "model": "meta-llama/llama-3.1-8b-instruct",
+                "provider": "openrouter",
+                "base_url": "https://openrouter.ai/api/v1",
+            },
+        }
+        with patch.dict(server._sessions, {"s-or": session}, clear=False), \
+                patch.object(server, "_write_config_key") as write_key:
+            resp = _set({"key": "fast", "session_id": "s-or", "value": "fast"})
+        assert resp["result"]["value"] == "fast"
+        assert session["create_service_tier_override"] == "priority"
+        write_key.assert_not_called()
+
 
 class TestConfigGetFastSessionScope:
     def test_reads_prebuild_pin(self) -> None:
@@ -124,3 +157,48 @@ class TestConfigGetFastSessionScope:
         with patch.object(server, "_load_service_tier", return_value="priority"):
             resp = _get({"key": "fast"})
         assert resp["result"]["value"] == "fast"
+
+
+class TestSlashFastGlobalUnpins:
+    """``/fast X --global`` persists and unpins so ``/model`` follows overlays."""
+
+    def test_fast_flex_global_then_model_follows_overlay(self) -> None:
+        agent = _agent()
+        agent.model = "openai/gpt-5"
+        agent.provider = "openrouter"
+        agent.base_url = "https://openrouter.ai/api/v1"
+        agent.service_tier = "priority"
+        agent._service_tier_session_pinned = True
+        session = {
+            "session_key": "k-g",
+            "agent": agent,
+            "create_service_tier_override": "priority",
+        }
+        cfg = {
+            "agent": {
+                "service_tier": "flex",
+                "service_tier_overrides": {
+                    "openai/gpt-5": "flex",
+                    "moonshotai/kimi-k2.6": "priority",
+                },
+            }
+        }
+        with patch.dict(server._sessions, {"s-g": session}, clear=False), \
+                patch.object(server, "_write_config_key") as write_key, \
+                patch.object(server, "_persist_live_session_runtime"), \
+                patch.object(server, "_emit"), \
+                patch.object(server, "_session_info", return_value={}), \
+                patch("hermes_cli.config.load_config_readonly", return_value=cfg):
+            warning = server._mirror_slash_side_effects(
+                "s-g", session, "/fast flex --global",
+            )
+            assert warning == ""
+            write_key.assert_called_once_with("agent.service_tier", "flex")
+            assert agent._service_tier_session_pinned is False
+            assert "create_service_tier_override" not in session
+
+            from agent import fast_mode
+
+            assert fast_mode.effective_request_overrides(agent)["service_tier"] == "flex"
+            agent.model = "moonshotai/kimi-k2.6"
+            assert fast_mode.effective_request_overrides(agent)["service_tier"] == "priority"
