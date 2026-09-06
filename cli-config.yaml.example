@@ -308,9 +308,10 @@ model:
 #   # is excluded (Portal ignores or rejects the provider object).
 #   # Not live for @preset/ models, :nitro/:floor variants, custom:
 #   # endpoints, anthropic_messages, codex_responses, other api_modes,
-#   # or direct providers. Cron reads this order from config. Batch
-#   # does not load provider_routing from config — sticky applies
-#   # there only when providers_order is passed on the CLI.
+#   # or direct providers. Cron binds sticky from config (including
+#   # per-model overlay). Batch does not load provider_routing from
+#   # config — sticky applies there only when providers_order is
+#   # passed on the CLI.
 #   # sticky_order:
 #   #   enabled: true            # default: false
 #   #   ttl_seconds: 600         # default: 600
@@ -321,18 +322,18 @@ model:
 #   # Data policy: "allow" (default) or "deny" to exclude providers that may store data
 #   # data_collection: "deny"
 #
-#   # Per-model routing overrides (optional). When the active model exactly
-#   # matches a key below, its keys win over the flat ones above — per key,
-#   # not as a whole block: keys you don't list fall through to the flat
-#   # defaults. Applies on every surface (CLI, messaging gateway, TUI and
-#   # Desktop) and is re-resolved on a mid-session /model switch.
+#   # Per-model overrides (optional). Same keys as above; applied when the
+#   # agent is on that model. Matching is spelling-tolerant like
+#   # agent.reasoning_overrides; unset keys fall through to the flat values.
+#   # Overlay lives at request time, so CLI, gateway, TUI/Desktop, cron,
+#   # /model, fallback, and delegated children all pick it up.
 #   # NOTE: model ids contain dots, so dotted `config set` cannot reach them --
 #   # set the section as a whole JSON blob or edit YAML directly.
 #   models:
-#     google/gemini-3.7-flash:
-#       only: ["google-ai-studio"]   # hard-pin this model to one provider
-#     z-ai/glm-5.3-flash:
-#       order: ["z-ai/fp8"]          # soft preference, fallbacks allowed
+#     "openai/gpt-6-astra":
+#       only: ["openai"]
+#     "anthropic/claude-fable-5.1":
+#       only: ["anthropic"]
 
 # =============================================================================
 # OpenRouter Response Caching (only applies when using OpenRouter)

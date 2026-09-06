@@ -378,14 +378,34 @@ def _validated_openrouter_provider_sort(raw_sort: Any) -> Optional[str]:
 
 
 def _provider_preferences_for_agent(agent) -> Dict[str, Any]:
-    """Build the validated provider-routing object shared by request paths."""
-    preferences: Dict[str, Any] = {}
-    for key, value in (("only", agent.providers_allowed), ("ignore", agent.providers_ignored),
-        ("order", agent.providers_order), ("sort", _validated_openrouter_provider_sort(agent.provider_sort)),
-        ("require_parameters", True if agent.provider_require_parameters else None),
-        ("data_collection", agent.provider_data_collection)):
-        if value:
-            preferences[key] = value
+    """Build the validated provider-routing object shared by request paths.
+
+    ``provider_routing.models.<id>`` overlays the flat constructor values for the CURRENT
+    ``agent.model`` (so ``/model`` switches, fallbacks, and delegated children on another
+    model each get their own pins without any surface re-plumbing the kwargs). Sticky
+    then pins inside that already-resolved pool.
+    """
+    flat = {"only": agent.providers_allowed, "ignore": agent.providers_ignored, "order": agent.providers_order,
+        "sort": agent.provider_sort, "require_parameters": agent.provider_require_parameters,
+        "data_collection": agent.provider_data_collection}
+    per_model = {}
+    models = None
+    with contextlib.suppress(Exception):
+        from hermes_cli.config import load_config_readonly
+        _pr = load_config_readonly().get("provider_routing")
+        if isinstance(_pr, dict) and isinstance(_pr.get("models"), dict):
+            models = _pr.get("models")
+    if not isinstance(models, dict):
+        routing_cfg = getattr(agent, "_provider_routing_config", None)
+        if isinstance(routing_cfg, dict):
+            models = routing_cfg.get("models")
+    with contextlib.suppress(Exception):
+        from hermes_constants import resolve_per_model_provider_routing
+        per_model = resolve_per_model_provider_routing(agent.model, models)
+    merged = {**flat, **{k: v for k, v in per_model.items() if k in flat}}
+    merged["sort"] = _validated_openrouter_provider_sort(merged["sort"])
+    merged["require_parameters"] = True if merged["require_parameters"] else None
+    preferences = {key: value for key, value in merged.items() if value}
     try:
         from agent.sticky_provider_order import (
             apply_sticky_order_to_preferences,
@@ -1872,8 +1892,10 @@ def _fallback_reason_text(reason: "FailoverReason | None") -> str:
 
 
 def _is_anthropic_wire_url(url: str) -> bool:
-    """Same host match as determine_api_mode() / _detect_api_mode_for_url()."""
-    return url.rstrip("/").lower().endswith("/anthropic") or base_url_hostname(url) == "api.anthropic.com"
+    """Same Messages-only host match as determine_api_mode() / _detect_api_mode_for_url(): api.anthropic.com,
+    a /anthropic suffix, or Kimi Code's api.kimi.com/coding (its /chat/completions 404s — #77256)."""
+    from hermes_cli.providers import host_mandated_api_mode
+    return host_mandated_api_mode(url) == "anthropic_messages"
 
 
 def _fallback_api_mode_hint(fb: dict, fb_provider: str, fb_base_url_hint: Optional[str]) -> tuple[bool, str]:
@@ -3046,18 +3068,12 @@ class _StreamingCall:
         role = "assistant"
         _diag = self._new_diag()
         self._writer_token = self._attempt_request_client = self._attempt_stream_response = None
+        from agent.chat_completion_helpers_relay import RelayChatAccumulator
+        relay_response = RelayChatAccumulator()
 
         def _open_stream(next_api_kwargs: dict[str, Any]):
             timeout = _httpx.Timeout(connect=conn_cap, read=read_timeout, write=base_timeout, pool=conn_cap)
             return self._open_chat_stream({**next_api_kwargs, "stream": True, "timeout": timeout})
-
-        def _relay_final_response() -> dict[str, Any]:
-            tool_calls.materialize()
-            message = {"role": role, "content": "".join(content_parts) or None,
-                "reasoning_content": "".join(reasoning_parts) or None,
-                "tool_calls": [tool_calls_acc[i] for i in sorted(tool_calls_acc)] or None}
-            return {"model": model_name, "usage": usage_obj,
-                "choices": [{"message": message, "finish_reason": finish_reason or "stop"}]}
 
         def _flush_pending_stream_text():
             pending_parts = list(pending_text_parts)
@@ -3067,8 +3083,8 @@ class _StreamingCall:
 
         from agent import relay_llm
         stream = self._set_managed_stream(relay_llm.stream(self.api_kwargs, _open_stream,
-            **_relay_stream_identity(self.agent, "provider"), finalizer=_relay_final_response,
-            on_stream_created=self._chat_stream_created,
+            **_relay_stream_identity(self.agent, "provider"), finalizer=relay_response.finalize,
+            on_stream_created=self._chat_stream_created, on_chunk=relay_response.observe,
             accept_chunk=lambda chunk: self._accept_chat_chunk(stream_attempt_id, chunk),
             completed_response_predicate=lambda value: hasattr(value, "choices"),
             metadata=_relay_stream_metadata(self.agent, "chat_completions"), defer_logical_completion=True))

@@ -23,6 +23,52 @@ fork only if a change needs a discussion thread.
 
 ---
 
+## 2026-09-06 — `main` → `dev` after upstream #104159 (per-model `provider_routing.models`)
+
+- **Status:** active (fork-local merge note).
+- **Summary:** upstream
+  [#104159](https://github.com/NousResearch/hermes-agent/pull/104159)
+  landed `provider_routing.models.<id>` as a request-time overlay in
+  `_provider_preferences_for_agent` (spelling-tolerant
+  `_canonical_model_variants`, same matching as `agent.reasoning_overrides`).
+  That is the slim chokepoint implementation of the schema from
+  [#24495](https://github.com/NousResearch/hermes-agent/pull/24495) and
+  this fork's
+  [#100711](https://github.com/NousResearch/hermes-agent/pull/100711);
+  teknium1 closed #100711 as routing-superseded and asked for focused
+  follow-ups if sticky or service-tier work is pursued. This merge
+  **takes main's chokepoint** and keeps fork `sticky_order` plus
+  `service_tier` / TTFT escalation. Overlay runs first, sticky pins
+  inside that pool. The OpenRouter speed-tier pin no longer overwrites
+  an explicit user `only` on the base `gpt-6-astra` slug.
+- **Files:** `agent/chat_completion_helpers.py`
+  (`_provider_preferences_for_agent`),
+  `hermes_constants.resolve_per_model_provider_routing`,
+  `plugins/model-providers/openrouter/__init__.py`,
+  `tests/agent/test_per_model_provider_routing.py`,
+  `cli-config.yaml.example`,
+  `website/docs/user-guide/features/provider-routing.md`.
+  Constructor-time `resolve_provider_routing_for_model` /
+  `apply_provider_routing_to_agent` remain for sticky bind, `/model`
+  resync, and delegated children.
+- **Upstream disposition:** #104159 is on `main`. #100711 is closed.
+  Service-tier overrides, TTFT escalation, and sticky_order stay
+  fork-local (see 2026-08-31 / 2026-09-01).
+- **Merge risk:** do not drop sticky after the overlay; a model change
+  without re-bind already fail-closes sticky (`bound_model`). After this
+  merge re-run `tests/agent/test_per_model_provider_routing.py`,
+  `tests/test_per_model_routing_and_service_tier.py`,
+  `tests/agent/test_sticky_provider_order.py`, and
+  `tests/tools/test_delegate_provider_routing.py`.
+- **Known limitations (accepted):** wire overlay uses #104159
+  spelling-tolerant matching; constructor/sticky bind still uses the
+  fork's asymmetric `provider_routing_model_ids_match` (variant keys do
+  not cross-apply). They agree on exact ids and `:nitro`/`:floor`
+  isolation; aggregator-prefix and dash/dot spelling are corrected at
+  request time by the chokepoint.
+
+---
+
 ## 2026-09-06 — Known test-artifact cleanup
 
 - **Status:** active (fork-local).
@@ -80,7 +126,12 @@ fork only if a change needs a discussion thread.
 
 ## 2026-09-01 — Sticky provider order: Hermes-side pin + cyclic rotation on provider failure
 
-- **Status:** active (fork-local).
+- **Status:** active (fork-local). Follow-up 2026-09-06: per-model
+  `order`/`only` overlay for the wire now lives in upstream's
+  `_provider_preferences_for_agent` chokepoint (#104159), so cron,
+  fallback, and delegated children get the overlay without extra
+  surface plumbing. Sticky still binds the pool at init / `/model` /
+  fallback resync and pins *after* that overlay.
 - **Summary:** opt-in `provider_routing.sticky_order` (`enabled`, `ttl_seconds`,
   defaults `false` / `600`). Rationale: OpenRouter disables its own sticky
   routing when a manual `provider.order` is set (their docs: "Sticky routing
@@ -117,8 +168,9 @@ fork only if a change needs a discussion thread.
   logged (slug, reason, index) to `agent.log`, never into the prompt.
   State is per-agent (`agent._sticky_provider_order`), bound in
   `agent_init` (so cron / subagents / CLI background get it from the same
-  config; cron uses the flat `order` from config, while batch only gets a
-  pool when `providers_order` is passed explicitly — pre-existing:
+  config; cron and subagents bind the pool from the same config,
+  including per-model overlay, while batch only gets a pool when
+  `providers_order` is passed explicitly — pre-existing:
   `batch_runner` does not read `provider_routing` from config) and
   re-bound by `apply_provider_routing_to_agent` on
   `/model` / fallback resync (pool change via order or only → keep the
@@ -153,9 +205,8 @@ fork only if a change needs a discussion thread.
   deliberate, the next request should avoid the timing-out provider;
   `server_error` rotates the pin but is not added to
   `_is_transport_failure` (no new eager fallback class when the feature is
-  off); cron resolves only the flat `order` from config (pre-existing
-  scope boundary — per-model overlays were never applied there, sticky
-  follows the same boundary); batch does not read `provider_routing`
+  off); cron now receives per-model overlay on the wire via #104159
+  and binds the sticky pool from the same config at init; batch does not read `provider_routing`
   from config at all (pre-existing) — sticky applies there only when
   `providers_order` is passed explicitly on the CLI; helper-level tests
   cover the gates, plus a
@@ -168,7 +219,11 @@ fork only if a change needs a discussion thread.
 
 ## 2026-08-31 — Per-model OpenRouter provider routing + service tier, opt-in per-turn tier escalation
 
-- **Status:** active (fork-local). Follow-up 2026-09-01: `provider_routing`
+- **Status:** active (fork-local). Routing half **merged-upstream** via
+  [#104159](https://github.com/NousResearch/hermes-agent/pull/104159)
+  (2026-09-06) — `provider_routing.models.<id>` is now the request-time
+  chokepoint on `main`. Service-tier overrides + TTFT escalation remain
+  fork-local. Follow-up 2026-09-01: `provider_routing`
   registered in the `hermes config set` validator schema
   (`_SCHEMA_KNOWN_DICT_KEYS`, `hermes_cli/config.py`) — the key was never in
   `DEFAULT_CONFIG`, so `config set` printed a false "not a recognized config
@@ -235,24 +290,24 @@ fork only if a change needs a discussion thread.
   `website/docs/user-guide/configuration.md`,
   `website/docs/reference/slash-commands.md`.
 - **Upstream disposition:** the `provider_routing.models.<id>` schema
-  deliberately mirrors open upstream PR
-  [#24495](https://github.com/NousResearch/hermes-agent/pull/24495) (issue
-  [#24493](https://github.com/NousResearch/hermes-agent/issues/24493)) so
-  user configs stay compatible if it merges. That PR wires only the CLI
-  reader at agent-init time; this fork resolves on all three surfaces and
-  on mid-session `/model`. We do **not** absorb its
-  `model.models.<id>.context_length` half (out of scope — `model_overrides`
-  already covers per-model context windows here). Per-model service tier
-  has no upstream counterpart:
+  landed on `main` in
+  [#104159](https://github.com/NousResearch/hermes-agent/pull/104159)
+  (credited against [#24495](https://github.com/NousResearch/hermes-agent/pull/24495)
+  and [#100711](https://github.com/NousResearch/hermes-agent/pull/100711))
+  as a chokepoint overlay, not per-surface plumbing. We do **not** absorb
+  #24495's `model.models.<id>.context_length` half (out of scope —
+  `model_overrides` already covers per-model context windows here).
+  Per-model service tier has no upstream counterpart:
   [#78097](https://github.com/NousResearch/hermes-agent/issues/78097) is
   per-provider and open. TTFT escalation has no upstream counterpart.
-- **Merge risk:** when #24495 merges upstream, expect textual conflicts in
-  `cli.py` (provider_routing read path) and `cli-config.yaml.example`;
-  semantics are identical (per-model wins per key, fall-through), so the
-  resolution is keep-both-shape. `agent/conversation_loop.py` is
-  high-churn — after each weekly `main` merge re-run
-  `tests/agent/test_service_tier_escalation.py` and
-  `tests/test_per_model_routing_and_service_tier.py`.
+  teknium1 asked for a focused PR if the tier half is pursued.
+- **Merge risk:** overlay+sticky live together in
+  `_provider_preferences_for_agent` — take main's overlay, keep sticky
+  after it. `agent/conversation_loop.py` is high-churn — after each
+  weekly `main` merge re-run
+  `tests/agent/test_service_tier_escalation.py`,
+  `tests/test_per_model_routing_and_service_tier.py`, and
+  `tests/agent/test_per_model_provider_routing.py`.
 - **Known limitations (accepted):** escalation observes only streaming
   main-conversation requests (the non-streaming fallback path produces no
   observation); length-continuation and compression/redirect restarts drop
@@ -265,9 +320,11 @@ fork only if a change needs a discussion thread.
   `methods_config.py`); the classic CLI gates the whole `/fast` command
   behind `_fast_command_available()`, so `/fast status` stays unavailable
   there for models without Priority/Fast support (gateway and TUI report
-  `flex` fine); cron sessions and `delegate_task` subagents do not apply
-  the per-model overlays (conscious scope boundary — the requested surfaces
-  were CLI, Telegram gateway, and Desktop); gateway `/fast` model identity
+  `flex` fine); per-model `provider_routing` overlay now also applies on
+  cron and delegated children via the #104159 request-time chokepoint
+  (service-tier overlays on those surfaces remain a conscious scope
+  boundary — the requested surfaces were CLI, Telegram gateway, and
+  Desktop); gateway `/fast` model identity
   after an auth-fallback reflects the fallback model only when the global
   `model.default` is empty — `last_resolved_model` is consulted solely as
   the empty-config fallback, so with a configured default the status tracks

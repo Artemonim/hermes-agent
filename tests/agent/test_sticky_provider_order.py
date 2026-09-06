@@ -1539,9 +1539,12 @@ class TestStickyOrderModelBinding:
         assert state.bound_model == "other-model"
         assert state.pool == ["other-1", "other-2"]
         assert agent.model == "google/gemini-flash"
+        assert agent.providers_order == ["other-1", "other-2"]
         assert sticky_is_live(agent) is False
+        # * Wire prefs follow live agent.model (#104159 chokepoint), not the
+        # apply() bind target. Sticky stays off while bound_model differs.
         prefs = _provider_preferences_for_agent(agent)
-        assert prefs["order"] == ["other-1", "other-2"]
+        assert prefs["order"] == ["overlay-x", "overlay-y"]
         assert "allow_fallbacks" not in prefs
 
 
