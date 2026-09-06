@@ -23,6 +23,27 @@ fork only if a change needs a discussion thread.
 
 ---
 
+## 2026-09-06 — Known test-artifact cleanup
+
+- **Status:** active (fork-local).
+- **Summary:** the canonical test runner removes recognized untracked Windows
+  approval sentinels and numeric SQLite files / empty locks beneath
+  `MagicMock/mock._session_db.db_path` after workers finish, including failed
+  runs and Python-level interruption. Nested runner probes defer cleanup to
+  their parent. Git-tracked files, unrelated content, and links are preserved;
+  directories are removed only when empty. Cleanup errors remain visible.
+- **Files:** `scripts/run_tests_parallel.py`,
+  `tests/test_run_tests_artifact_cleanup.py`.
+- **Upstream disposition:** local containment for leaks still present in upstream
+  `tests/tools/test_approved_command_clean_slate.py` and mock session database
+  paths. An upstream contribution should fix the generating test fixtures and
+  shell path handling; cleanup does not repair those tests' behavior.
+- **Known limitations:** forced process termination cannot execute a finalizer;
+  the next completed runner invocation can remove the leftovers. Run only one
+  top-level suite per checkout. Nonstandard artifact names are left for review.
+
+---
+
 ## 2026-09-04 — `main` → `dev` after upstream #102117 (facade + siblings)
 
 - **Status:** active (fork-local merge note).

@@ -52,6 +52,7 @@ import tempfile
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, Future
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Dict, List, Tuple
 
@@ -103,6 +104,13 @@ _DEFAULT_FILE_RETRIES = 1
 # wall-clock seconds. Used by ``--slice`` to distribute files across
 # CI jobs by estimated total time, so no one job gets all the slow files.
 _DURATIONS_FILE = "test_durations.json"
+
+# * Match only the escaped Windows paths emitted by the approval test probes.
+_LEAKED_SENTINEL_RE = re.compile(
+    r"[A-Za-z][:\uf03a].*hermes-pytest-tmproot-.*pytest-.*"
+    r"test_approved_(?:command_genuine_|note_enriched_).*cmd_started_[cd]"
+)
+_MOCK_DB_FILE_RE = re.compile(r"\d+(?:\.(?:fts_rebuild|quarantine)\.lock)?")
 
 
 def _split_pathspec(value: str) -> List[str]:
@@ -1122,7 +1130,7 @@ def main() -> int:
             if rc != 0:
                 _print_inline_failure(fpath, output, repo_root, pytest_passthrough)
 
-    with ThreadPoolExecutor(max_workers=args.jobs) as pool:
+    with _test_artifact_cleanup(repo_root), ThreadPoolExecutor(max_workers=args.jobs) as pool:
         futures: List[Future] = []
         for file in files:
             t0 = time.monotonic()
@@ -1256,6 +1264,72 @@ def main() -> int:
         return 1
 
     return 0
+
+
+def _cleanup_test_artifacts(repo_root: Path) -> None:
+    """Remove recognized untracked test leaks after all workers finish.
+
+    Relative mock database paths and shell-escaped sentinels escape pytest's
+    temporary root. Restrict cleanup by location, name, contents, and Git
+    tracking; do not follow links or recursively delete directories.
+    """
+    repo_root = repo_root.resolve()
+    candidates = [
+        path for path in repo_root.iterdir()
+        if _LEAKED_SENTINEL_RE.fullmatch(path.name)
+    ]
+    mock_root = repo_root / "MagicMock"
+    database_dir = mock_root / "mock._session_db.db_path"
+    mock_directories = (mock_root, database_dir)
+    if all(not path.is_symlink() and path.is_dir() and path.resolve() == path
+           for path in mock_directories):
+        candidates.extend(
+            path for path in database_dir.iterdir()
+            if _MOCK_DB_FILE_RE.fullmatch(path.name)
+        )
+    if not candidates:
+        return
+
+    # * Git failure aborts cleanup rather than risking tracked content.
+    result = subprocess.run(
+        ["git", "ls-files", "--cached", "-z"], cwd=repo_root,
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True, timeout=30,
+    )
+    tracked = {repo_root / os.fsdecode(name) for name in result.stdout.split(b"\0") if name}
+    removed = 0
+    for path in candidates:
+        if path in tracked or path.is_symlink() or path.resolve() != path or not path.is_file():
+            continue
+        if path.parent == database_dir and path.name.isdecimal():
+            with path.open("rb") as handle:
+                if handle.read(16) != b"SQLite format 3\0":
+                    continue
+        elif path.stat().st_size != 0:
+            continue
+        path.unlink()
+        removed += 1
+
+    for path in reversed(mock_directories):
+        if (not path.is_symlink() and path.is_dir()
+                and path.resolve() == path and not any(path.iterdir())):
+            path.rmdir()
+    if removed:
+        print(f"  Cleaned {removed} known test artifact files from the checkout.", flush=True)
+
+
+@contextmanager
+def _test_artifact_cleanup(repo_root: Path):
+    """Clean actual test runs without turning help or discovery into mutations."""
+    try:
+        yield
+    finally:
+        # * Nested runner probes inherit the worker's temp root; only the outer
+        # * runner cleans the checkout, after its other workers have finished.
+        if "PYTEST_DEBUG_TEMPROOT" not in os.environ:
+            try:
+                _cleanup_test_artifacts(repo_root)
+            except (OSError, subprocess.SubprocessError) as exc:
+                print(f"WARNING: test artifact cleanup failed: {exc}", file=sys.stderr)
 
 
 if __name__ == "__main__":
