@@ -3188,7 +3188,12 @@ class TelegramAdapter(BasePlatformAdapter):
         reply_to: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
     ) -> SendResult:
-        """Send preformatted HTML without MarkdownV2 conversion (STT expandable quotes)."""
+        """Send preformatted HTML without MarkdownV2 conversion.
+
+        Used for STT expandable transcript quotes and other callers that already
+        emit Telegram HTML (``<blockquote expandable>``, escaped entities, …).
+        Falls back to plain text if Telegram rejects the HTML parse.
+        """
         try:
             from telegram.constants import ParseMode
         except ImportError:
@@ -3197,24 +3202,60 @@ class TelegramAdapter(BasePlatformAdapter):
 
         from gateway.stt_echo import chunk_telegram_stt_echo_html
 
-        html_chunks = chunk_telegram_stt_echo_html(content, self.MAX_MESSAGE_LENGTH, utf16_len)
+        # * STT echoes wrap the whole transcript in one expandable quote.
+        #   truncate_message() would split inside those tags, so continuation
+        #   messages lose the collapsed quote (or fail HTML parse). Re-wrap
+        #   each slice as its own <blockquote expandable>.
+        html_chunks = chunk_telegram_stt_echo_html(
+            content, self.MAX_MESSAGE_LENGTH, utf16_len,
+        )
         chunks = (
-            html_chunks if html_chunks is not None
-            else self.truncate_message(content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len)
+            html_chunks
+            if html_chunks is not None
+            else self.truncate_message(
+                content, self.MAX_MESSAGE_LENGTH, len_fn=utf16_len,
+            )
         )
         message_ids: list[str] = []
         thread_id = self._metadata_thread_id(metadata)
+        private_dm_topic_send = self._is_private_dm_topic_send(
+            chat_id, thread_id, metadata,
+        )
+        # * Same targeting as send() / _try_send_rich. Early HTML return must
+        #   not skip the DM-topic fail-closed contract (missing reply anchor or
+        #   a dead topic must not leak the echo into the general chat).
+        routing = self._compute_single_send_routing(
+            chat_id, reply_to, metadata, thread_id,
+        )
+        if routing is None:
+            return SendResult(
+                success=False,
+                error=self._dm_topic_missing_anchor_error(),
+                retryable=False,
+            )
+        routed_reply_to_id, routed_thread_kwargs = routing
+        dm_topic_created = bool(
+            metadata and metadata.get("telegram_dm_topic_created_for_send")
+        )
+        fail_closed_topic = private_dm_topic_send or dm_topic_created
 
         for i, chunk in enumerate(chunks):
-            reply_to_id = None
-            if self._should_thread_reply(reply_to, i):
-                reply_to_id = self._reply_to_message_id_for_send(
-                    reply_to, metadata, reply_to_mode=self._reply_to_mode,
+            if private_dm_topic_send:
+                reply_to_id = routed_reply_to_id
+                thread_kwargs = routed_thread_kwargs
+            else:
+                reply_to_id = None
+                if self._should_thread_reply(reply_to, i):
+                    reply_to_id = self._reply_to_message_id_for_send(
+                        reply_to, metadata, reply_to_mode=self._reply_to_mode,
+                    )
+                thread_kwargs = self._thread_kwargs_for_send(
+                    chat_id,
+                    thread_id,
+                    metadata,
+                    reply_to_message_id=reply_to_id,
+                    reply_to_mode=self._reply_to_mode,
                 )
-            thread_kwargs = self._thread_kwargs_for_send(
-                chat_id, thread_id, metadata,
-                reply_to_message_id=reply_to_id, reply_to_mode=self._reply_to_mode,
-            )
             kwargs: Dict[str, Any] = {
                 "chat_id": normalize_telegram_chat_id(chat_id),
                 "text": chunk,
@@ -3225,11 +3266,26 @@ class TelegramAdapter(BasePlatformAdapter):
                 **self._notification_kwargs(metadata),
             }
             try:
-                msg = await self._send_message_with_thread_fallback(**kwargs)
+                if fail_closed_topic:
+                    try:
+                        msg = await self._bot.send_message(**kwargs)
+                    except Exception as send_err:
+                        if self._is_thread_not_found_error(send_err):
+                            return SendResult(
+                                success=False,
+                                error=str(send_err),
+                                retryable=False,
+                            )
+                        raise
+                else:
+                    msg = await self._send_message_with_thread_fallback(**kwargs)
             except Exception as html_err:
                 err_lower = str(html_err).lower()
                 if "parse" in err_lower or "entity" in err_lower or "html" in err_lower:
-                    logger.warning("[%s] HTML parse failed, falling back to plain text: %s", self.name, html_err)
+                    logger.warning(
+                        "[%s] HTML parse failed, falling back to plain text: %s",
+                        self.name, html_err,
+                    )
                     plain = (
                         chunk.replace("<blockquote expandable>", "")
                         .replace("<blockquote>", "")
@@ -3239,7 +3295,10 @@ class TelegramAdapter(BasePlatformAdapter):
                     plain = _html.unescape(plain)
                     kwargs["text"] = plain
                     kwargs["parse_mode"] = None
-                    msg = await self._send_message_with_thread_fallback(**kwargs)
+                    if fail_closed_topic:
+                        msg = await self._bot.send_message(**kwargs)
+                    else:
+                        msg = await self._send_message_with_thread_fallback(**kwargs)
                 else:
                     raise
             message_ids.append(str(msg.message_id))
@@ -3247,7 +3306,10 @@ class TelegramAdapter(BasePlatformAdapter):
         if not (metadata or {}).get("notify"):
             with contextlib.suppress(Exception):
                 await self.send_typing(chat_id, metadata=metadata)
-        return SendResult(success=True, message_id=message_ids[0] if message_ids else None)
+        return SendResult(
+            success=True,
+            message_id=message_ids[0] if message_ids else None,
+        )
 
     @staticmethod
     def _telegram_error_types() -> tuple:
@@ -5009,13 +5071,35 @@ class TelegramAdapter(BasePlatformAdapter):
         text = re.sub(r'~~(.+?)~~', _ph_wrap('~', '~'), text)
         text = re.sub(r'\|\|(.+?)\|\|', _ph_wrap('||', '||'), text)
         # 9) Blockquotes: protect leading > from escaping; expandable quotes (**> starts, trailing || ends).
-        def _convert_blockquote(m):
-            prefix, content = m.group(1), m.group(2)  # prefix: >, >>, >>>, **>, **>> …
-            if prefix.startswith('**') and content.endswith('||'):
-                return _ph(f'{prefix} {_escape_mdv2(content[:-2])}||')
-            return _ph(f'{prefix} {_escape_mdv2(content)}')
-
-        text = re.sub(r'^((?:\*\*)?>{1,3}) (.+)$', _convert_blockquote, text, flags=re.MULTILINE)
+        # * Telegram MarkdownV2 expandable quotes use **> on the first line, >
+        #   on continuations, and trailing || on the last line of the block.
+        #   A single-line regex that only special-cases **>…|| would escape the
+        #   expandability mark on the final > line and break collapse.
+        _bq_line_re = re.compile(r'^((?:\*\*)?>{1,3})(?: (.*))?$')
+        _bq_out: list[str] = []
+        _bq_expandable = False
+        for _bq_line in text.split('\n'):
+            _bq_match = _bq_line_re.match(_bq_line)
+            if not _bq_match:
+                _bq_expandable = False
+                _bq_out.append(_bq_line)
+                continue
+            _bq_prefix = _bq_match.group(1)
+            _bq_content = _bq_match.group(2) if _bq_match.group(2) is not None else ''
+            if _bq_prefix.startswith('**'):
+                _bq_expandable = True
+            if _bq_expandable and _bq_content.endswith('||'):
+                _bq_body = _bq_content[:-2]
+                if _bq_body:
+                    _bq_out.append(_ph(f'{_bq_prefix} {_escape_mdv2(_bq_body)}||'))
+                else:
+                    _bq_out.append(_ph(f'{_bq_prefix}||'))
+                _bq_expandable = False
+            elif _bq_content:
+                _bq_out.append(_ph(f'{_bq_prefix} {_escape_mdv2(_bq_content)}'))
+            else:
+                _bq_out.append(_ph(_bq_prefix))
+        text = '\n'.join(_bq_out)
         # 10) Escape remaining special characters in plain text
         text = _escape_mdv2(text)
         # 11) Restore placeholders in reverse insertion order so nested placeholders resolve.

@@ -576,6 +576,14 @@ fork only if a change needs a discussion thread.
 
 - **Status:** active (fork-local). Follow-up 2026-08-29 keeps the quote
   intact when a long transcript is split across Telegram's length cap.
+  Follow-up 2026-09-06: restored two pieces the #102117 merge
+  (`dac26201`) dropped — the fail-closed DM-topic routing in
+  `_send_html_message` (missing reply anchor or dead topic must not leak
+  the HTML echo into the general chat; matches upstream PR
+  [#98419](https://github.com/NousResearch/hermes-agent/pull/98419)) and
+  the `_bq_expandable` line-state walker in `format_message` step 9
+  (multiline expandable quotes keep the trailing `||` unescaped; fork
+  commits `449c17e9a9` / `bf82a96ca8`).
 - **Summary:** inbound voice STT is still echoed when
   `stt.echo_transcripts` is true (that toggle is upstream). On Telegram
   the echo is an HTML expandable blockquote
