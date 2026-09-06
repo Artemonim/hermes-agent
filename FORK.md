@@ -200,7 +200,8 @@ fork only if a change needs a discussion thread.
   redesigned chokepoint-native on #104159: bind/TTL once per logical
   request, pin applied read-only in `_provider_preferences_for_agent`, no
   constructor plumbing; config re-read per logical request; speed-tier
-  astra slugs gated off. PR pending.
+  astra slugs gated off. Opened upstream as
+  [#104587](https://github.com/NousResearch/hermes-agent/pull/104587).
 - **Merge risk:** post-#102117 the rotate-after-`classify_api_error` hook
   lives in `agent/turn_api_error.py`; retry-budget / fallback gates remain
   in `agent/conversation_loop.py`. Re-run
@@ -313,7 +314,8 @@ fork only if a change needs a discussion thread.
   hardening). Redesigned onto main's seams: request-time per-model tier
   resolution in `agent/fast_mode.py` (no resync plumbing), tier-key
   provenance (`_framework_baked_tier_keys`) so raw
-  `request_overrides` pass through. PR pending.
+  `request_overrides` pass through. Opened upstream as
+  [#104586](https://github.com/NousResearch/hermes-agent/pull/104586).
 - **Merge risk:** overlay+sticky live together in
   `_provider_preferences_for_agent` — take main's overlay, keep sticky
   after it. `agent/conversation_loop.py` is high-churn — after each
