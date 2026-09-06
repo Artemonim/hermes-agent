@@ -2193,6 +2193,7 @@ def init_agent(
     event_callback: Optional[Callable[[str, dict], None]] = None,
     reaction_callback: Optional[Callable[[str], None]] = None, max_tokens: int = None,
     reasoning_config: Dict[str, Any] = None, service_tier: str = None,
+    service_tier_escalation: Dict[str, Any] = None,
     request_overrides: Dict[str, Any] = None, prefill_messages: List[Dict[str, Any]] = None,
     platform: str = None, user_id: str = None, user_id_alt: str = None, user_name: str = None,
     chat_id: str = None, chat_name: str = None, chat_type: str = None, thread_id: str = None,
@@ -2268,6 +2269,8 @@ def init_agent(
     # * Surfaces that apply a session /fast set this True after construction. Default-off so
     # delegated children never inherit a parent session pin.
     agent._service_tier_session_pinned = False
+    # * Batch / background constructors set this True so an enabled config cannot climb.
+    agent._block_service_tier_escalation = False
     agent.prefill_messages = prefill_messages or []  # Prefilled conversation turns
     agent._force_ascii_payload = False
 
@@ -2289,6 +2292,14 @@ def init_agent(
         _agent_cfg = _load_agent_config()
     except Exception:
         _agent_cfg = {}
+
+    from agent.service_tier_escalation import bind_service_tier_escalation
+
+    _esc_raw = service_tier_escalation
+    if _esc_raw is None and isinstance(_agent_cfg, dict):
+        _agent_section = _agent_cfg.get("agent")
+        _esc_raw = _agent_section if isinstance(_agent_section, dict) else None
+    bind_service_tier_escalation(agent, _esc_raw)
 
     _apply_display_config(agent, _agent_cfg, platform)
     _init_memory(agent, _agent_cfg, skip_memory, platform)

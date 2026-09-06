@@ -1238,6 +1238,22 @@ agent:
   #   "anthropic/claude-opus-4.6": "priority"
   service_tier_overrides: {}
 
+  # Opt-in per-turn OpenRouter service-tier climb on slow streaming TTFT.
+  # consecutive_slow_requests slow successes climb one rung (flex -> default ->
+  # priority) for the REST of that turn; the next user prompt resets to the
+  # configured base. Never mutates agent.service_tier / request_overrides.
+  # Hard-off for cron, batch, subagents, background tasks, and /fast pins.
+  # Non-streaming calls, length-continuation, and compression/redirect restarts
+  # produce no observation (conservative under-escalation).
+  # service_tier_escalation:
+  #   enabled: true                    # default: false (opt-in)
+  #   ttft_threshold_seconds: 8.0
+  #   consecutive_slow_requests: 1
+  service_tier_escalation:
+    enabled: false
+    ttft_threshold_seconds: 8.0
+    consecutive_slow_requests: 1
+
   # Custom personalities (use with /personality command).
   # Built-ins (helpful, concise, technical, creative, teacher, kawaii, catgirl,
   # pirate, shakespeare, surfer, noir, uwu, philosopher, hype) are always

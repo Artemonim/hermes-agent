@@ -252,7 +252,10 @@ def _process_single_prompt(
             skip_context_files=True,  # Don't pollute trajectories with SOUL.md/AGENTS.md
             skip_memory=True,  # Don't use persistent memory in batch runs
             **{key: config.get(key) for key in _AGENT_PASSTHROUGH},
+            # * Hard-disable TTFT ladder even if a caller passes enabled config.
+            service_tier_escalation={"enabled": False},
         )
+        agent._block_service_tier_escalation = True
 
         # task_id ensures each task gets its own isolated VM
         result = agent.run_conversation(prompt, task_id=task_id)

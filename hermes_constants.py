@@ -4,6 +4,7 @@ Import-safe, stdlib-only — importable from anywhere without circular-import ri
 """
 
 import contextlib
+import math
 import os
 import re
 import shutil
@@ -11,6 +12,7 @@ import stat
 import sys
 from contextvars import ContextVar, Token
 from pathlib import Path
+from typing import NamedTuple
 
 _profile_fallback_warned: bool = False
 _UNSET = object()
@@ -918,6 +920,124 @@ def parse_service_tier(value) -> str | None:
     if not normalized or normalized in SERVICE_TIER_DISABLED_VALUES:
         return None
     return _SERVICE_TIER_ALIASES.get(normalized)
+
+
+class ServiceTierEscalationConfig(NamedTuple):
+    """Validated ``agent.service_tier_escalation`` settings (opt-in TTFT ladder)."""
+
+    enabled: bool = False
+    ttft_threshold_seconds: float = 8.0
+    consecutive_slow_requests: int = 1
+
+
+DEFAULT_SERVICE_TIER_ESCALATION = ServiceTierEscalationConfig()
+
+
+def resolve_service_tier_escalation_config(agent_cfg) -> ServiceTierEscalationConfig:
+    """Parse ``agent.service_tier_escalation`` with safe defaults.
+
+    Invalid values log a warning and fall back to the matching default
+    (disabled / 8.0s / 1). Missing or non-dict sections return the
+    disabled default without raising.
+    """
+    defaults = DEFAULT_SERVICE_TIER_ESCALATION
+    if not isinstance(agent_cfg, dict):
+        return defaults
+    raw = agent_cfg.get("service_tier_escalation")
+    if raw is None:
+        return defaults
+    if not isinstance(raw, dict):
+        import logging
+        logging.getLogger(__name__).warning(
+            "Invalid agent.service_tier_escalation (expected mapping), "
+            "using disabled defaults",
+        )
+        return defaults
+
+    enabled, enabled_ok = _coerce_escalation_enabled(raw.get("enabled", False))
+    if not enabled_ok:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Invalid agent.service_tier_escalation.enabled %r, defaulting to false",
+            raw.get("enabled"),
+        )
+
+    threshold, threshold_ok = _coerce_escalation_threshold(
+        raw.get("ttft_threshold_seconds", defaults.ttft_threshold_seconds),
+    )
+    if not threshold_ok:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Invalid agent.service_tier_escalation.ttft_threshold_seconds %r, "
+            "defaulting to %s",
+            raw.get("ttft_threshold_seconds"),
+            defaults.ttft_threshold_seconds,
+        )
+
+    consecutive, consecutive_ok = _coerce_escalation_consecutive(
+        raw.get("consecutive_slow_requests", defaults.consecutive_slow_requests),
+    )
+    if not consecutive_ok:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Invalid agent.service_tier_escalation.consecutive_slow_requests %r, "
+            "defaulting to %s",
+            raw.get("consecutive_slow_requests"),
+            defaults.consecutive_slow_requests,
+        )
+
+    return ServiceTierEscalationConfig(
+        enabled=enabled,
+        ttft_threshold_seconds=threshold,
+        consecutive_slow_requests=consecutive,
+    )
+
+
+def _coerce_escalation_enabled(value) -> tuple[bool, bool]:
+    """Return ``(enabled, valid)``. Invalid → ``(False, False)``."""
+    if isinstance(value, bool):
+        return value, True
+    if isinstance(value, (int, float)) and value in (0, 1):
+        return bool(value), True
+    if isinstance(value, str):
+        normalized = value.strip().lower()
+        if normalized in {"true", "yes", "on", "1"}:
+            return True, True
+        if normalized in {"false", "no", "off", "0", ""}:
+            return False, True
+    if value is None:
+        return False, True
+    return False, False
+
+
+def _coerce_escalation_threshold(value) -> tuple[float, bool]:
+    """Return ``(seconds, valid)``. Must be a finite number ``> 0``."""
+    # * bool is a subclass of int; float(True) == 1.0 must not count as valid.
+    if isinstance(value, bool) or not isinstance(value, (int, float, str)):
+        return DEFAULT_SERVICE_TIER_ESCALATION.ttft_threshold_seconds, False
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_SERVICE_TIER_ESCALATION.ttft_threshold_seconds, False
+    if not math.isfinite(parsed) or parsed <= 0:
+        return DEFAULT_SERVICE_TIER_ESCALATION.ttft_threshold_seconds, False
+    return parsed, True
+
+
+def _coerce_escalation_consecutive(value) -> tuple[int, bool]:
+    """Return ``(count, valid)``. Must be an integer ``>= 1``."""
+    if isinstance(value, bool):
+        return DEFAULT_SERVICE_TIER_ESCALATION.consecutive_slow_requests, False
+    try:
+        parsed_float = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return DEFAULT_SERVICE_TIER_ESCALATION.consecutive_slow_requests, False
+    if not math.isfinite(parsed_float) or parsed_float != int(parsed_float):
+        return DEFAULT_SERVICE_TIER_ESCALATION.consecutive_slow_requests, False
+    parsed = int(parsed_float)
+    if parsed < 1:
+        return DEFAULT_SERVICE_TIER_ESCALATION.consecutive_slow_requests, False
+    return parsed, True
 
 
 def service_tier_status_label(tier: str | None) -> str:

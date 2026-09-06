@@ -1719,6 +1719,17 @@ def _load_service_tier() -> str | None:
     return parse_service_tier(raw)
 
 
+def _load_service_tier_escalation():
+    """``agent.service_tier_escalation``; missing/invalid → disabled defaults."""
+    from hermes_constants import resolve_service_tier_escalation_config
+
+    cfg = _load_cfg() or {}
+    agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else {}
+    return resolve_service_tier_escalation_config(
+        agent_cfg if isinstance(agent_cfg, dict) else {},
+    )
+
+
 def _fast_status_value(tier) -> str:
     """Map a canonical service_tier to the ``config.get/set fast`` status label."""
     from hermes_constants import service_tier_status_label

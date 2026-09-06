@@ -7,9 +7,10 @@ history, opens it).
 
 Effective wire kwargs are resolved **per request** in
 :func:`effective_request_overrides`: session ``/fast`` pin >
-``agent.service_tier_overrides`` > global ``agent.service_tier``. Only
-per-request params (``service_tier`` / ``speed``) vary, so the prompt cache
-survives the boundary. ``extra_body`` is never rewritten here.
+``agent.service_tier_overrides`` > global ``agent.service_tier``, then
+opt-in TTFT escalation overlays last. Only per-request params
+(``service_tier`` / ``speed``) vary, so the prompt cache survives the
+boundary. ``extra_body`` is never rewritten here.
 """
 
 from __future__ import annotations
@@ -75,12 +76,24 @@ def begin_turn(agent: Any, conversation_history: Any) -> None:
     agent._fast_until = time.monotonic() + max(window, 0.0)
 
 
+def _apply_escalation_overlay(agent: Any, overrides: dict[str, Any]) -> dict[str, Any]:
+    """Last-step TTFT ladder overlay. No-op when escalation is disabled or gated."""
+    try:
+        from agent.service_tier_escalation import apply_escalation_to_overrides
+
+        return apply_escalation_to_overrides(agent, overrides)
+    except Exception:
+        return overrides
+
+
 def effective_request_overrides(agent: Any) -> dict[str, Any]:
     """``agent.request_overrides`` plus the resolved service-tier wire keys.
 
     Stale ``service_tier`` / ``speed`` copied from a previous model or a parent
     session are replaced from the logical tier for *this* request. Other keys
-    (including ``extra_body``) are copied as-is.
+    (including ``extra_body``) are copied as-is. Opt-in TTFT escalation overlays
+    last and never mutates canonical ``agent.request_overrides`` /
+    ``agent.service_tier``.
     """
     overrides = dict(getattr(agent, "request_overrides", None) or {})
     overrides.pop("service_tier", None)
@@ -89,13 +102,13 @@ def effective_request_overrides(agent: Any) -> dict[str, Any]:
     model, provider, base_url = _agent_route(agent)
     if mode in BOUNDED_MODES:
         if time.monotonic() >= getattr(agent, "_fast_until", 0.0):
-            return overrides
+            return _apply_escalation_overlay(agent, overrides)
         from hermes_cli.models import resolve_fast_mode_overrides
 
         overrides.update(
             resolve_fast_mode_overrides(model, provider=provider, base_url=base_url) or {}
         )
-        return overrides
+        return _apply_escalation_overlay(agent, overrides)
     from hermes_cli.models import resolve_service_tier_overrides
 
     mapped = resolve_service_tier_overrides(
@@ -103,4 +116,4 @@ def effective_request_overrides(agent: Any) -> dict[str, Any]:
     )
     if mapped:
         overrides.update(mapped)
-    return overrides
+    return _apply_escalation_overlay(agent, overrides)
