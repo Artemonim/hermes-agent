@@ -2483,6 +2483,19 @@ class TestAuxiliaryTaskExtraBody:
             "provider": {"order": ["explicit-provider"]},
         }
 
+    def test_task_auto_service_tier_is_not_copied_to_extra_body(self, caplog):
+        from agent.auxiliary_client import _get_task_extra_body
+
+        config = {"auxiliary": {"vision": {"service_tier": "auto"}}}
+
+        with patch("hermes_cli.config.load_config", return_value=config), patch(
+            "hermes_cli.config.load_config_readonly", return_value=config
+        ), caplog.at_level(logging.WARNING, logger="agent.auxiliary_client"):
+            body = _get_task_extra_body("vision")
+
+        assert "service_tier" not in body
+        assert any("not supported" in rec.message for rec in caplog.records)
+
     def test_task_provider_shortcut_is_ignored_off_openrouter(self):
         from agent.auxiliary_client import _apply_task_openrouter_provider_order
 

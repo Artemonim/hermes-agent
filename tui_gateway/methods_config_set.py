@@ -147,23 +147,27 @@ def _set_model(rid, params, key, value, session):
 
 
 _FAST_WORDS = {"fast": "fast", "on": "fast", "normal": "normal", "off": "normal",
-               "flex": "flex", "auto": "auto", "cold": "cold"}
+               "auto": "auto", "cold": "cold", "flex": "flex", "priority": "fast"}
+_FAST_ON_TIERS = {"priority", "flex", "auto", "cold"}
 
 
 def _set_fast(rid, params, key, value, session):
     raw = _word(value)
     agent = session.get("agent") if session else None
-    if agent is not None:
+    if session is not None and session.get("create_service_tier_override") is not None:
+        current_tier = session["create_service_tier_override"] or None
+    elif agent is not None:
         current_tier = getattr(agent, "service_tier", None)
-    elif session is not None and session.get("create_service_tier_override") is not None:
-        current_tier = session["create_service_tier_override"] or None  # pre-build pin beats global
-    elif session:
+    elif session is not None:
         current_tier = _lazy_session_service_tier(session)
     else:
         current_tier = _load_service_tier()
     if raw == "status":
         return _kv(rid, key, _fast_status_value(current_tier))
-    nv = _FAST_WORDS.get(raw, ("normal" if _fast_status_value(current_tier) != "normal" else "fast") if raw in {"", "toggle"} else None)
+    nv = _FAST_WORDS.get(
+        raw,
+        ("normal" if current_tier in _FAST_ON_TIERS else "fast") if raw in {"", "toggle"} else None,
+    )
     if nv is None:
         return _err(rid, 4002, f"unknown fast mode: {value}")
     overrides = None
@@ -188,9 +192,10 @@ def _set_fast(rid, params, key, value, session):
         _write_config_key("agent.service_tier", nv)
     if agent is not None:
         agent.service_tier = {"fast": "priority", "normal": None}.get(nv, nv)
+        current_overrides = {k: v for k, v in (getattr(agent, "request_overrides", {}) or {}).items()
+                             if k not in ("service_tier", "speed")}
+        agent.request_overrides = {**current_overrides, **(overrides or {})}
         agent._service_tier_session_pinned = True
-        from agent.agent_runtime_helpers import sync_request_overrides_service_tier
-        sync_request_overrides_service_tier(agent)
         _persist_live_session_runtime(session)
         _emit_session_info(params.get("session_id", ""), session)
     return _kv(rid, key, nv)

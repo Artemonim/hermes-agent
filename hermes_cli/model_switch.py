@@ -944,10 +944,37 @@ def _aggregator_alias_error(
 
 
 def _aggregator_catalog_match(new_model: str, catalog: list) -> str | None:
-    """Exact (case-insensitive) match on full id, then on the bare part after ``vendor/``."""
+    """Exact (case-insensitive) match on full id, then on the bare part after ``vendor/``.
+
+    A ``vendor/model:variant`` request also matches the base catalog slug so
+    OpenRouter routing suffixes (``:nitro``, ``:floor``) resolve without a
+    provider switch.
+    """
+    from hermes_constants import strip_model_variant_suffix
+
     wanted = new_model.lower()
-    return next((mid for mid in catalog if mid.lower() == wanted), None) or next(
-        (mid for mid in catalog if "/" in mid and mid.split("/", 1)[1].lower() == wanted), None)
+    exact = next((mid for mid in catalog if mid.lower() == wanted), None)
+    if exact is not None:
+        return exact
+    variant_base = strip_model_variant_suffix(new_model).lower()
+    variant_base_bare = variant_base.rsplit("/", 1)[-1]
+    if variant_base != wanted:
+        base_hit = next((mid for mid in catalog if mid.lower() == variant_base), None)
+        if base_hit is not None:
+            return new_model
+        bare_hit = next(
+            (
+                mid for mid in catalog
+                if "/" in mid and mid.split("/", 1)[1].lower() == variant_base_bare
+            ),
+            None,
+        )
+        if bare_hit is not None:
+            return new_model
+    return next(
+        (mid for mid in catalog if "/" in mid and mid.split("/", 1)[1].lower() == wanted),
+        None,
+    )
 
 
 def _config_declares_model(

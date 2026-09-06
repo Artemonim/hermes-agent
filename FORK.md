@@ -154,6 +154,15 @@ fork only if a change needs a discussion thread.
   key" warning without `--force`; regression tests in
   `tests/hermes_cli/test_set_config_value.py` (`TestProviderRoutingSchema`).
   Adds `hermes_cli/config.py` to this entry's weekly-merge conflict surface.
+  Follow-up 2026-09-06: restored what the #102117 merge (`dac26201`) dropped —
+  the TTFT observation call sites (wrap in `agent/turn_api_call.py`,
+  `mark_ttft_send`/`mark_ttft_first_delta` in `_StreamingCall`); without them
+  the escalation ladder could never observe. Also restored the auto/cold
+  companions matching upstream PR
+  [#100711](https://github.com/NousResearch/hermes-agent/pull/100711):
+  `SERVICE_TIER_BOUNDED_VALUES`, `_ladder_tier` (auto/cold sit at the default
+  rung, window overrides are not stripped), aux `extra_body` limited to
+  flex/priority, TUI `_set_fast`/`_mirror_fast` companions, batch isolation.
 - **Summary:** three cooperating config axes for OpenRouter. (1)
   `provider_routing.models.<model>.<key>` — per-model overlay over the flat
   provider-routing keys (`only`/`ignore`/`order`/`sort`/
@@ -713,6 +722,15 @@ fork only if a change needs a discussion thread.
   base is accepted here and **rejected on upstream** (#94103). Auxiliary
   `providers` is OpenRouter-only. ZIP/docs still describe flex as
   OpenRouter/OpenAI-compatible, not a guarantee every provider honors it.
+  Follow-up 2026-09-06: post-#94103 the live contract is "unknown suffix
+  REJECTED, never fuzzy-corrected to another catalog id" (the tests encode
+  this; the "accepted" wording above is the older contract). Restored the
+  variant-suffix call sites the #102117 merge (`dac26201`) dropped:
+  skip-fuzzy guard in `hermes_cli/models_validate.py`,
+  `strip_model_variant_suffix` expansion in `_canonical_model_variants`,
+  `_aggregator_catalog_match` base matching in `hermes_cli/model_switch.py`,
+  `_custom_provider_model_matches` in `agent/agent_init.py`, and the
+  dual-lookup catalog accept in `_validate_live_listing`.
 
 ---
 

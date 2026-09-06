@@ -297,15 +297,33 @@ _FAST_TIERS = {
 
 
 def _mirror_fast(sid, session, agent, arg) -> None:
-    if not agent:
+    raw = (arg or "").strip().lower()
+    if raw in {"", "status"}:
+        if agent:
+            _emit("session.info", sid, _session_info(agent, session))
         return
-    word = (arg or "").split()[0].lower() if arg else ""
-    if word in _FAST_TIERS:
-        agent.service_tier = _FAST_TIERS[word]
+    if raw not in _FAST_TIERS:
+        return
+    tier = _FAST_TIERS[raw]
+    if session is not None:
+        session["create_service_tier_override"] = "" if tier is None else tier
+    if agent:
+        agent.service_tier = tier
         agent._service_tier_session_pinned = True
-        from agent.agent_runtime_helpers import sync_request_overrides_service_tier
-        sync_request_overrides_service_tier(agent)
-    _emit("session.info", sid, _session_info(agent, session))
+        current = {
+            k: v for k, v in (getattr(agent, "request_overrides", {}) or {}).items()
+            if k not in ("service_tier", "speed")
+        }
+        extra = {}
+        if tier in {"priority", "flex"}:
+            from hermes_cli.models import resolve_service_tier_overrides
+            extra = resolve_service_tier_overrides(
+                getattr(agent, "model", None), tier,
+                provider=getattr(agent, "provider", None),
+                base_url=getattr(agent, "base_url", None),
+            ) or {}
+        agent.request_overrides = {**current, **extra}
+        _emit("session.info", sid, _session_info(agent, session))
 
 
 def _mirror_reload_mcp(sid, session, agent, arg) -> None:

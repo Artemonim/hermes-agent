@@ -877,7 +877,8 @@ VALID_REASONING_EFFORTS = ("minimal", "low", "medium", "high", "xhigh", "max", "
 SERVICE_TIER_DISABLED_VALUES = frozenset(
     {"normal", "default", "standard", "off", "none"}
 )
-
+# * auto/cold are bounded fast-mode windows on agent.service_tier, not OpenRouter wire values.
+SERVICE_TIER_BOUNDED_VALUES = frozenset({"auto", "cold"})
 _SERVICE_TIER_ALIASES = {
     "fast": "priority",
     "on": "priority",
@@ -1076,12 +1077,14 @@ def _coerce_sticky_order_ttl(value) -> tuple[float, bool]:
 
 
 def parse_service_tier(value) -> str | None:
-    """Normalize a configured service tier to a supported wire value.
+    """Normalize a configured service-tier preference.
 
-    ``fast`` and ``on`` remain compatibility aliases for ``priority``.  The
-    OpenRouter ``flex`` tier is preserved as its own value.  Empty, normal,
-    and unrecognized values return ``None`` so callers can keep their current
-    default or report a configuration warning.
+    Wire values: ``priority`` (aliases ``fast`` / ``on``) and OpenRouter
+    ``flex``. Bounded fast-mode windows: ``auto`` and ``cold`` — stored on
+    ``agent.service_tier`` and applied per request by ``agent.fast_mode``,
+    not sent as OpenRouter ``service_tier``. Empty, normal, and unrecognized
+    values return ``None`` so callers can keep their current default or
+    report a configuration warning.
     """
     normalized = str(value or "").strip().lower()
     if not normalized or normalized in SERVICE_TIER_DISABLED_VALUES:
@@ -1140,6 +1143,11 @@ def _canonical_model_variants(model: str) -> list[str]:
         dashed, dotted = s.replace('.', '-'), s.replace('-', '.')
         _add(s, dashed, dotted, _dash_to_dot(s), _dot_to_dash(s), _dash_to_dot(dashed), _dot_to_dash(dotted))
     _add_with_derivatives(model)
+    # * A configured base slug applies to its provider-routed variants, but
+    # * exact variant-specific entries above keep precedence.
+    variant_base = strip_model_variant_suffix(model)
+    if variant_base != model:
+        _add_with_derivatives(variant_base)
     parts = model.split('/')
     if len(parts) >= 2:  # bare model (strip provider/aggregator prefix)
         _add_with_derivatives(parts[-1])
@@ -1325,10 +1333,10 @@ def resolve_service_tier_for_model(agent_cfg, model: str = "") -> str | None:
     """Resolve effective service tier: per-model override, else global.
 
     Session pins are applied by callers *before* this function. Values go
-    through :func:`parse_service_tier` (``flex`` / ``priority``, aliases;
-    ``normal`` / ``default`` / empty → ``None``). An invalid per-model value
-    logs a warning and falls back to ``agent.service_tier``; an invalid
-    global value logs a warning and returns ``None``.
+    through :func:`parse_service_tier` (``flex`` / ``priority`` / ``auto`` /
+    ``cold``; ``normal`` / ``default`` / empty → ``None``). An invalid
+    per-model value logs a warning and falls back to ``agent.service_tier``;
+    an invalid global value logs a warning and returns ``None``.
     """
     if not isinstance(agent_cfg, dict):
         agent_cfg = {}

@@ -40,7 +40,7 @@ from agent.tool_guardrails import (
 from hermes_cli.config import cfg_get
 from hermes_cli.route_identity import normalize_route_base_url
 from hermes_cli.timeouts import get_provider_request_timeout
-from hermes_constants import get_hermes_home, parse_service_tier, resolve_provider_routing_for_model
+from hermes_constants import get_hermes_home, parse_service_tier, resolve_provider_routing_for_model, strip_model_variant_suffix
 from utils import base_url_host_matches, is_truthy_value
 
 # Same logger name as run_agent so caplog/patches on "run_agent" see our records.
@@ -245,6 +245,7 @@ def _normalized_custom_base_url(value: Any) -> str:
 
 def _custom_provider_model_matches(agent_model: str, entry: Dict[str, Any]) -> bool:
     agent_model_norm = str(agent_model or "").strip().lower()
+    base_model_norm = strip_model_variant_suffix(agent_model_norm).lower()
     # Multi-model entries (`providers.<name>.models` mapping / legacy `models:` list):
     # matching ANY catalog entry counts, else a provider whose `model` differs from the
     # session model drops its extra_body (e.g. OpenAI service_tier) → wrong billing tier.
@@ -253,7 +254,15 @@ def _custom_provider_model_matches(agent_model: str, entry: Dict[str, Any]) -> b
     if catalog and agent_model_norm in catalog:
         return True
     provider_model = str(entry.get("model", "") or "").strip().lower()
-    return (not provider_model and not catalog) or provider_model == agent_model_norm
+    if not provider_model and not catalog:
+        return True
+    if provider_model == agent_model_norm:
+        return True
+    if base_model_norm != agent_model_norm:
+        if catalog and base_model_norm in catalog:
+            return True
+        return provider_model == base_model_norm
+    return False
 
 
 def _custom_provider_extra_body_for_agent(

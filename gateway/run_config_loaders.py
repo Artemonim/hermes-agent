@@ -221,16 +221,31 @@ class GatewayConfigLoadersMixin:
 
     @classmethod
     def _load_service_tier(cls, model: str = "") -> str | None:
-        """Per-model ``agent.service_tier_overrides`` wins over global ``agent.service_tier``."""
+        """Per-model ``agent.service_tier_overrides`` wins over global ``agent.service_tier``.
+
+        ``auto`` / ``cold`` stay first-class global windows (main's fast-mode).
+        ``resolve_service_tier_for_model`` maps them; the fallback below is
+        defensive if an overlay value is empty after that parse.
+        """
         from gateway.run import _load_gateway_runtime_config
         from hermes_constants import resolve_service_tier_for_model
 
         cfg = _load_gateway_runtime_config()
         agent_cfg = cfg.get("agent") if isinstance(cfg, dict) else {}
-        return resolve_service_tier_for_model(
-            agent_cfg if isinstance(agent_cfg, dict) else {},
-            model,
-        )
+        if not isinstance(agent_cfg, dict):
+            agent_cfg = {}
+        resolved = resolve_service_tier_for_model(agent_cfg, model)
+        if resolved is not None:
+            return resolved
+        overrides = agent_cfg.get("service_tier_overrides")
+        model_key = str(model or "")
+        if isinstance(overrides, dict) and model_key and model_key in overrides:
+            raw_override = str(overrides[model_key] or "").strip().lower()
+            return raw_override if raw_override in {"auto", "cold"} else None
+        raw = str(agent_cfg.get("service_tier", "") or "").strip().lower()
+        if raw in {"auto", "cold"}:
+            return raw
+        return None
 
     @staticmethod
     def _load_service_tier_escalation():

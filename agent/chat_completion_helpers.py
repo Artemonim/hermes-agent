@@ -2880,6 +2880,12 @@ class _StreamingCall:
         )
 
     def _fire_first_delta(self):
+        try:
+            from agent.service_tier_escalation import mark_ttft_first_delta
+
+            mark_ttft_first_delta(self.agent)
+        except Exception:
+            pass
         if not self.first_delta_fired["done"] and self.on_first_delta:
             self.first_delta_fired["done"] = True
             self._quiet(self.on_first_delta)
@@ -2978,6 +2984,12 @@ class _StreamingCall:
             self.agent._create_request_openai_client(reason="chat_completion_stream_request", api_kwargs=stream_kwargs))
         self.last_chunk_time["t"] = time.time()
         self.agent._touch_activity("waiting for provider response (streaming)")
+        try:
+            from agent.service_tier_escalation import mark_ttft_send
+
+            mark_ttft_send(self.agent)
+        except Exception:
+            pass
         return request_client.chat.completions.create(**stream_kwargs)
 
     def _chat_stream_created(self, raw_stream: Any) -> None:
@@ -3123,6 +3135,12 @@ class _StreamingCall:
                 _flush_pending_stream_text()
                 for tc_delta in delta_tool_calls:
                     name = tool_calls.feed(tc_delta)
+                    try:
+                        from agent.service_tier_escalation import mark_ttft_first_delta
+
+                        mark_ttft_first_delta(self.agent)
+                    except Exception:
+                        pass
                     if name is not None:
                         self._emit_tool_started(name)
                         # Lets the stub-builder warn if streaming dies before the args

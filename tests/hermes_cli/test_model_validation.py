@@ -707,6 +707,23 @@ class TestValidateOpenRouterVariantSuffixes:
             )
         assert result.get("corrected_model") is None
 
+    def test_curated_catalog_accepts_suffixed_sku_when_base_absent(self):
+        """Live listing misses both ids; curated catalog lists only the
+        suffixed SKU. Dual lookup must accept ``vendor/model:exacto`` even
+        when the stripped base is absent.
+        """
+        suffixed = "acme/widget-9:exacto"
+        with patch(
+            "hermes_cli.models._model_in_provider_catalog",
+            side_effect=lambda name_lower, _providers: name_lower == suffixed,
+        ):
+            result = _validate(
+                suffixed, "openrouter", api_models=["unrelated/other-model"]
+            )
+        assert result["accepted"] is True
+        assert result.get("corrected_model") is None
+        assert "curated catalog" in (result.get("message") or "")
+
     def test_static_catalog_fallback_accepts_variant(self):
         """Gateway path: /models unreachable → static catalog validates the
         base id and preserves the suffix."""

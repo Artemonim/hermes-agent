@@ -5654,7 +5654,8 @@ def _get_task_extra_body(task: str) -> Dict[str, Any]:
         if configured_tier is not None and configured_tier != "":
             from hermes_constants import parse_service_tier
             tier = parse_service_tier(configured_tier)
-            if tier is not None:
+            # * auto/cold are agent windows, not auxiliary extra_body wire values.
+            if tier in {"flex", "priority"}:
                 result["service_tier"] = tier
             else:
                 logger.warning(
