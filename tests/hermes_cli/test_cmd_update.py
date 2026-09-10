@@ -81,7 +81,7 @@ def _patch_managed_uv(request):
 
 
 @pytest.fixture(autouse=True)
-def _patch_gateway_discovery():
+def _patch_gateway_discovery(isolated_update_runtime):
     """Keep cmd_update's gateway auto-restart phase off this machine's gateways.
 
     The restart phase used to swallow every exception at debug level, so these
@@ -103,6 +103,11 @@ def _patch_gateway_discovery():
     drops ``hermes_cli.gateway`` from ``sys.modules`` mid-update, so the
     restart phase's later ``from hermes_cli.gateway import ...`` binds an
     unpatched module and real discovery (and ``os.kill``) runs on this box.
+
+    Nested with ``isolated_update_runtime`` (conftest): that fixture isolates
+    PROJECT_ROOT and the shared runtime-fleet seams; the patches here keep
+    the Windows/update stubs that fixture does not cover, including
+    ``_fleet_probe_expected_runtimes`` and ``report_unaccounted_runtimes``.
     """
     with patch("hermes_cli.gateway.find_gateway_pids", return_value=[]), \
          patch("hermes_cli.gateway.supports_systemd_services", return_value=False), \
@@ -1281,6 +1286,7 @@ class TestNodeRuntimeNpmResolution:
         from hermes_cli import update_cmd
 
         desktop_dir = PROJECT_ROOT / "apps" / "desktop"
+        (desktop_dir / "package.json").write_text("{}", encoding="utf-8")
         packaged_exe = desktop_dir / "release" / "win-unpacked" / "Hermes.exe"
         build_ok = subprocess.CompletedProcess([], 0, stdout="", stderr="")
 
