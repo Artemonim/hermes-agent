@@ -410,39 +410,21 @@ def _filter_non_gateway_concurrent_instances(matches: list[tuple[int, str]]) -> 
 
 
 def _log_only_write(text: str) -> None:
-    """Write ``text`` to ``~/.hermes/logs/update.log`` only, never the terminal.
-
-    During ``hermes update`` ``sys.stdout`` is an ``_UpdateOutputStream`` that
-    mirrors to both the terminal and ``update.log``. Loud, low-signal
-    subprocess output (npm installs, the Electron/vite build, the cua-driver
-    installer's "Next steps" wall) should be captured and tucked into the log
-    so failures stay debuggable, without flooding the user's terminal. This
-    reaches past the mirroring stream straight to the underlying log handle.
-
-    When the wrapper is absent (a wrap-setup failure, or a caller outside
-    ``cmd_update``), fall through to the same log path. Windows Desktop's
-    idle watchdog watches that file; a silent no-op here is how a live
-    Electron rebuild used to be killed at 600s with exit 124.
-    """
+    """Write to update.log only: reaches past the ``_UpdateOutputStream`` stdout mirror so
+    loud, low-signal subprocess output stays debuggable without flooding the terminal."""
     if not text:
         return
-    payload = text if text.endswith("\n") else text + "\n"
     stream = _m().sys.stdout
     log_file = getattr(stream, "_log", None)
-    if log_file is not None:
-        try:
-            log_file.write(payload)
+    with suppress(Exception):
+        if log_file is None:
+            log_path = get_hermes_home() / "logs" / "update.log"
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            with log_path.open("a", encoding="utf-8") as fallback:
+                fallback.write(text)
+        else:
+            log_file.write(text)
             log_file.flush()
-            return
-        except Exception:
-            pass
-    try:
-        logs_dir = get_hermes_home() / "logs"
-        logs_dir.mkdir(parents=True, exist_ok=True)
-        with (logs_dir / "update.log").open("a", encoding="utf-8") as fh:
-            fh.write(payload)
-    except Exception:
-        pass
 
 
 @contextmanager
@@ -453,6 +435,11 @@ def _update_progress_heartbeat(message: str, *, interval_seconds: int = 30):
     silence on both stdout and ``logs/update.log``. ``npm --progress=false``
     and captured Electron builds are routinely quiet that long. *message*
     must contain ``{elapsed}``.
+
+    ``print`` is the primary tick: ``cmd_update`` wraps stdout (CLI and
+    gateway), so the hangup tee already mirrors into ``update.log``. The
+    ``_log_only_write`` fallback ticks that file only when wrap is absent
+    (wrap-setup failure, or a caller outside ``cmd_update``).
     """
     done = threading.Event()
     start = _time.time()
@@ -462,11 +449,10 @@ def _update_progress_heartbeat(message: str, *, interval_seconds: int = 30):
             elapsed = int(_time.time() - start)
             line = message.format(elapsed=elapsed)
             print(line, flush=True)
-            # The hangup tee mirrors print() into update.log. When stdout
-            # is not wrapped (gateway mode today, wrap-setup failure), still
-            # tick the file the Windows Desktop idle watchdog watches.
+            # Hangup tee already mirrors print() into update.log when wrapped.
+            # Tick the file via _log_only_write only if wrap is absent.
             if getattr(sys.stdout, "_log", None) is None:
-                _log_only_write(line)
+                _log_only_write(line if line.endswith("\n") else line + "\n")
 
     t = threading.Thread(target=_beat, daemon=True, name="update-heartbeat")
     t.start()
@@ -478,50 +464,38 @@ def _update_progress_heartbeat(message: str, *, interval_seconds: int = 30):
 
 
 def _run_logged_subprocess(cmd, *, cwd=None, env=None):
-    """Run ``cmd`` capturing combined output into update.log (not the terminal).
+    """Stream combined build output to update.log, retaining it for failure reporting."""
+    import codecs
+    import io
+    from hermes_cli._subprocess_compat import kill_process_tree, windows_hide_flags
 
-    Output is streamed to the log as it arrives so the Windows Desktop
-    hand-off idle watchdog (600s, watches ``logs/update.log`` growth) can
-    see a 40-minute Electron/vite build as progress. Buffering until
-    ``subprocess.run`` returned made every rebuild look stalled.
-
-    Returns the ``CompletedProcess`` (with ``stdout`` populated) so the caller
-    can decide whether to surface the captured output on failure.
-    """
-    chunks: list[str] = []
-    child_env = dict(env) if env is not None else os.environ.copy()
-    # Python children block-buffer stdout when it is a pipe; without this
-    # the line loop below still sees nothing until the child exits.
+    child_env = dict(os.environ if env is None else env)
     child_env.setdefault("PYTHONUNBUFFERED", "1")
+    spawn = {"creationflags": windows_hide_flags()} if os.name == "nt" else {"process_group": 0}
+    proc = subprocess.Popen(
+        cmd, cwd=cwd, env=child_env, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, **spawn)
+    # read1 delivers partial lines too; incremental decoding preserves split UTF-8
+    # and the universal-newline behavior callers previously got from text=True.
+    decoder = io.IncrementalNewlineDecoder(codecs.getincrementaldecoder("utf-8")("replace"), True)
+    output = []
     try:
-        proc = subprocess.Popen(
-            cmd,
-            cwd=cwd,
-            env=child_env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            bufsize=1,
-        )
-    except OSError as exc:
-        return subprocess.CompletedProcess(cmd, 127, stdout="", stderr=str(exc))
-
-    try:
-        if proc.stdout is not None:
-            for line in proc.stdout:
-                chunks.append(line)
-                _log_only_write(line)
-        returncode = proc.wait()
-    except Exception:
-        proc.kill()
-        try:
+        while True:
+            chunk = proc.stdout.read1(8192)
+            text = decoder.decode(chunk, final=not chunk)
+            output.append(text)
+            _log_only_write(text)
+            if not chunk:
+                break
+        return subprocess.CompletedProcess(cmd, proc.wait(), stdout="".join(output))
+    except BaseException:
+        # Unlike Popen.__exit__, do not wait for a cancelled build to finish.
+        kill_process_tree(proc)
+        with suppress(subprocess.TimeoutExpired):
             proc.wait(timeout=5)
-        except Exception:
-            pass
         raise
-    return subprocess.CompletedProcess(cmd, returncode, stdout="".join(chunks), stderr=None)
+    finally:
+        proc.stdout.close()
 
 
 def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):

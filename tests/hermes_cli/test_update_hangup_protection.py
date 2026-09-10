@@ -206,8 +206,8 @@ class TestFinalizeUpdateOutput:
 
 class TestLogOnlyWrite:
 
-    def test_unwrapped_stdout_still_appends_update_log(self, monkeypatch):
-        """Unwrapped stdout must still grow logs/update.log (Desktop watchdog)."""
+    def test_plain_stdout_keeps_build_output_off_screen(self, monkeypatch):
+        """An unwrapped stdout must not receive log-only build output."""
         from hermes_constants import get_hermes_home
 
         plain = io.StringIO()
