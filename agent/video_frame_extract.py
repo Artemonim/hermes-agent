@@ -406,7 +406,7 @@ def _extract_frames_command(
     frame_budget: int,
     timeout: float,
 ) -> List[str]:
-    from tools.transcription_tools import (
+    from tools.transcription_command import (
         _command_stt_env_passthrough,
         _render_command_stt_template,
         _run_command_stt,

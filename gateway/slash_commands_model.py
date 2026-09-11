@@ -15,7 +15,7 @@ import logging
 from typing import Any, Optional
 
 from agent.i18n import t
-from gateway.platforms.base import MessageEvent
+from gateway.platforms.event import MessageEvent
 from hermes_cli.config import atomic_config_write, clear_model_endpoint_credentials
 from utils import base_url_host_matches
 
@@ -734,9 +734,12 @@ class GatewayModelCommandsMixin:
 
         # The /reasoning parser strips --global (any position) and normalizes unicode dashes.
         args, persist_global = self._parse_reasoning_command_args(event.get_command_args().strip().lower())
-        session_key = self._session_key_for_source(event.source)
+        # * Same Telegram topic recovery as /model and /reasoning (#30479): a
+        # * lobby /fast must pin under the key the next message turn reads.
+        source = await asyncio.to_thread(self._normalize_source_for_session_key, event.source)
+        session_key = self._session_key_for_source(source)
         model = self._resolve_session_effective_model(
-            source=event.source, session_key=session_key,
+            source=source, session_key=session_key,
         )
         self._service_tier = self._resolve_session_service_tier(session_key=session_key, model=model)
         is_status = not args or args == "status"

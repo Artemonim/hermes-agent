@@ -263,10 +263,10 @@ class TestSupportsReasoningExtraBodyGate:
             patch("run_agent.check_toolset_requirements", return_value={}),
             patch("run_agent.OpenAI"),
             patch(
-                "hermes_cli.models.openrouter_model_reasoning_capabilities",
+                "hermes_cli.models_reasoning_caps.openrouter_model_reasoning_capabilities",
                 return_value=None,
             ),
-            patch("hermes_cli.models.warm_openrouter_reasoning_caps_async"),
+            patch("hermes_cli.models_reasoning_caps.warm_openrouter_reasoning_caps_async"),
         ):
             agent = AIAgent(
                 api_key="test-key-1234567890",

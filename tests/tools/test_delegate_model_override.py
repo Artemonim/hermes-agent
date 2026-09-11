@@ -1014,7 +1014,14 @@ class TestDelegateModelOverrideRealResolver(unittest.TestCase):
         self.assertNotIn("error", parsed, parsed)
         mock_agent.assert_called_once()
         _, kwargs = mock_agent.call_args
-        self.assertEqual(kwargs["model"], self.catalog_model)
+        from hermes_cli.model_normalize import normalize_model_for_provider
+
+        # * Catalog spelling (``claude-fable-5.1``) and Anthropic wire form
+        # * (``claude-fable-5-1``) are the same model after provider normalize.
+        self.assertEqual(
+            kwargs["model"],
+            normalize_model_for_provider(self.catalog_model, "anthropic"),
+        )
         self.assertEqual(kwargs["api_key"], "sk-ant-test-fixture")
 
     def test_real_resolver_rejects_unknown_model_without_spawn(self):

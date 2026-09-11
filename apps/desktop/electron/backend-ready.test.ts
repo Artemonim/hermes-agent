@@ -321,12 +321,6 @@ test('bufferedOutput without a sentinel still times out (no false positive)', as
   await assert.rejects(wait, /Timed out waiting/)
 })
 
-// ---------------------------------------------------------------------------
-// Arm-then-claim (#09af remake): READY during claimBackendChild is consumed by
-// the first watcher. A second waitForDashboardPortAnnouncement after claim
-// never sees it — that was the Desktop hang (90s timeout).
-// ---------------------------------------------------------------------------
-
 test('armBackendReadyAnnouncement sees READY emitted during claimBackendChild', async () => {
   const child = makeFakeChild()
   const armed = armBackendReadyAnnouncement(child, { timeoutMs: 1000 })
@@ -352,4 +346,29 @@ test('a second READY watcher after claim times out (the 09af hang)', async () =>
 
   const late = waitForDashboardPortAnnouncement(child, { timeoutMs: 50 })
   await assert.rejects(late, /Timed out waiting/)
+})
+
+test('the merged-tail seed recovers a sentinel spliced onto a partial stderr line (#103792)', async () => {
+  const child = makeFakeChild()
+
+  // uvicorn's stderr chunk has no trailing newline, so the tail is not line-accurate.
+  const port = await waitForDashboardPortAnnouncement(child, {
+    bufferedOutput: () => 'INFO  Started server process [4711]HERMES_BACKEND_READY port=65238',
+    timeoutMs: 500
+  })
+
+  assert.equal(port, 65238)
+})
+
+test('the merged-tail seed does not match prose that merely names the sentinel', async () => {
+  const child = makeFakeChild()
+
+  const wait = waitForDashboardPort(
+    child,
+    50,
+    () => '',
+    () => 'still waiting for HERMES_BACKEND_READY from the backend\n'
+  )
+
+  await assert.rejects(wait, /Timed out waiting/)
 })

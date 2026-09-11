@@ -325,21 +325,17 @@ class _UpdateOutputStream:
 def _install_hangup_protection(gateway_mode: bool = False):
     """Protect ``cmd_update`` from SIGHUP (→ SIG_IGN, inherited by pip/git children) and broken pipes
     (stdio wrapped in ``_UpdateOutputStream``). SIGINT/SIGTERM are left alone — legitimate cancels.
-
-    In gateway mode the update is already detached, so SIGHUP protection is skipped. Output is
-    still mirrored to ``update.log`` because the Windows Desktop hand-off watchdog uses growth
-    of that file as its progress signal.
-    """
+    Gateway updates are already detached, but still need the log mirror for the
+    Desktop progress watchdog. Returns state for ``_finalize_update_output``."""
     state = {
         "prev_stdout": sys.stdout, "prev_stderr": sys.stderr, "log_file": None, "installed": False}
 
-    if not gateway_mode:
-        import signal as _signal
+    import signal as _signal
 
-        if hasattr(_signal, "SIGHUP"):
-            # Non-main thread: update still runs, just without hangup protection.
-            with contextlib.suppress(ValueError, OSError):
-                _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
+    if not gateway_mode and hasattr(_signal, "SIGHUP"):
+        # Non-main thread: update still runs, just without hangup protection.
+        with contextlib.suppress(ValueError, OSError):
+            _signal.signal(_signal.SIGHUP, _signal.SIG_IGN)
 
     # Any failure here is non-fatal; we just skip the wrap.
     try:

@@ -13,8 +13,8 @@ from utils import base_url_host_matches
 
 # Static OpenRouter fallback when the live /v1/models capability cache is cold.
 _OPENROUTER_REASONING_PREFIXES = (
-    "deepseek/", "anthropic/", "openai/", "x-ai/", "google/gemini-2", "google/gemma-4",
-    "qwen/qwen3", "tencent/hy", "xiaomi/",
+    "deepseek/", "anthropic/", "openai/", "x-ai/", "google/gemini-2", "google/gemini-3",
+    "google/gemma-4", "qwen/qwen3", "tencent/hy", "xiaomi/", "stealth/",
 )
 
 # Probe results cache per (model, base_url). Definitive values cache permanently; an
