@@ -67,6 +67,11 @@ def _valid_credential_pair(api_key: Any, base_url: Any) -> bool:
 def _swap_fallback_clients(agent, fb_client, fb_provider: str, fb_model: str, fb_base_url: str, fb_api_mode: str) -> None:
     """Install the fallback client(s) in place, honoring request_timeout_seconds (None = SDK default)."""
     timeout = get_provider_request_timeout(fb_provider, fb_model)
+    if fb_provider == "bedrock" and fb_api_mode in ("anthropic_messages", "bedrock_converse"):
+        # Non-Mantle Bedrock: boto3-chain auth, no OpenAI/Anthropic SDK client to carry over.
+        from agent.bedrock_adapter import bind_bedrock_runtime
+        bind_bedrock_runtime(agent, fb_base_url, fb_api_mode)
+        return
     # The SDK exposes an empty/stale api_key when a rotating source is installed.
     key_provider = vars(fb_client).get("_api_key_provider")
     credential = key_provider if callable(key_provider) else fb_client.api_key
@@ -601,8 +606,9 @@ class ClientLifecycleMixin:
         api_key, base_url = creds.get("api_key"), creds.get("base_url")
         if not _valid_credential_pair(api_key, base_url):
             return False
-        if str(api_key).strip() == str(self.api_key or "").strip():
-            return False  # store holds the same key: nothing to adopt, no client rebuild
+        if (str(api_key).strip() == str(self.api_key or "").strip()
+                and str(base_url).strip().rstrip("/") == str(self.base_url or "").strip().rstrip("/")):
+            return False  # store holds the same key on the same route: nothing to adopt, no client rebuild
         if require_account is not None:
             try:
                 from hermes_cli.auth_constants import _decode_jwt_claims

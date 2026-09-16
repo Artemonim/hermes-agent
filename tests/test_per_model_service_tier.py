@@ -325,6 +325,54 @@ def test_explicit_per_model_normal_omits_tier_on_wire(monkeypatch):
         agent.close()
 
 
+def test_iteration_summary_wire_kwargs_include_effective_tier(monkeypatch):
+    """Iteration-limit summary rides ``_build_api_kwargs`` (main's path); effective tier must still reach create().
+
+    The branch used ``_iteration_summary_chat_kwargs`` + ``_apply_effective_overrides_to_summary_kwargs``.
+    After the merge those are gone; this is the surviving contract, not a second extra_body merge.
+    """
+    from types import SimpleNamespace
+    from unittest.mock import MagicMock
+    from run_agent import AIAgent
+
+    _empty_tier_cfg(monkeypatch)
+    agent = AIAgent(
+        api_key="k",
+        base_url=_OPENROUTER,
+        provider="openrouter",
+        api_mode="chat_completions",
+        model=_MATCH,
+        quiet_mode=True,
+        skip_context_files=True,
+        skip_memory=True,
+        save_trajectories=False,
+        enabled_toolsets=["file"],
+        service_tier="flex",
+    )
+    try:
+        agent._service_tier_session_pinned = True
+        agent._cached_system_prompt = "You are helpful."
+        agent.suppress_status_output = True
+        ordinary = agent._build_api_kwargs([{"role": "user", "content": "hi"}])
+        assert ordinary.get("service_tier") == "flex"
+
+        msg = SimpleNamespace(content="Summary", tool_calls=None)
+        choice = SimpleNamespace(message=msg, finish_reason="stop")
+        resp = SimpleNamespace(choices=[choice], model=agent.model, usage=None)
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.return_value = resp
+        agent.client = mock_client
+        agent._ensure_primary_openai_client = lambda **_k: mock_client
+
+        result = agent._handle_max_iterations([{"role": "user", "content": "do stuff"}], 1)
+        assert result == "Summary"
+        sent = mock_client.chat.completions.create.call_args.kwargs
+        assert sent.get("service_tier") == "flex"
+        assert sent["service_tier"] == ordinary["service_tier"]
+    finally:
+        agent.close()
+
+
 def test_explicit_global_normal_strips_raw_priority(monkeypatch):
     """Explicit global ``agent.service_tier: normal`` is a framework source; raw keys are stripped."""
     import hermes_cli.config as config_mod
