@@ -1432,7 +1432,7 @@ class TestStickyOrderSummaryPath:
             raise _StatusError(429, "rate limited")
 
         result, _captured = _run_iteration_summary(agent, raise_429)
-        assert "error" in result.lower()
+        assert "continue" in result and "max_iterations" in result
         assert agent._sticky_provider_order.active_index == 0
         assert _provider_preferences_for_agent(agent)["order"] == [pool[0]]
 
@@ -1510,7 +1510,7 @@ class TestStickyOrderSummaryPath:
         assert captured[2]["order"] == [pool[1]]
         assert captured[3]["order"] == [pool[2]]
         assert agent._sticky_provider_order.active_index == 2
-        assert "error" in result.lower()
+        assert "continue" in result and "max_iterations" in result
 
     def test_disabled_summary_provider_block_matches_feature_off(self):
         unbound, pool = _summary_sticky_agent()
@@ -1552,8 +1552,7 @@ class TestStickyOrderSummaryPath:
         ):
             result, _captured = _run_iteration_summary(agent, raise_timeout)
 
-        assert "error" in result.lower()
-        assert "timed out" in result
+        assert "continue" in result and "max_iterations" in result
         assert agent._sticky_provider_order.active_index == 0
 
 
@@ -1573,8 +1572,7 @@ class TestStickyOrderFailOpen:
         ):
             result, captured = _run_iteration_summary(agent, raise_timeout)
 
-        assert "error" in result.lower()
-        assert "timed out" in result
+        assert "continue" in result and "max_iterations" in result
         assert captured[0]["order"] == [pool[0]]
         assert agent._sticky_provider_order.active_index == 0
         warnings = [

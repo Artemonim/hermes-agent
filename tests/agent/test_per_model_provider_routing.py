@@ -76,8 +76,7 @@ def test_batch_constructed_agent_gets_request_time_overlay():
     assert not agent.providers_order
     prefs = cch._provider_preferences_for_agent(agent)
     assert prefs.get("only") == ["google"]
-    kwargs = cch._iteration_summary_chat_kwargs(
-        agent,
+    kwargs = agent._build_api_kwargs(
         [{"role": "user", "content": "hi"}],
     )
     extra = kwargs.get("extra_body") or {}
