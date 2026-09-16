@@ -12,6 +12,7 @@ from agent.chat_completion_helpers import (
     handle_max_iterations,
 )
 from agent.error_classifier import FailoverReason, classify_api_error
+from agent.turn_failure_copy import site_copy
 from agent.sticky_provider_order import (
     apply_sticky_order_to_preferences,
     apply_sticky_retry_budget,
@@ -1048,8 +1049,7 @@ class TestStickyOrderSummaryPath:
 
         result, captured = _run_iteration_summary(agent, raise_timeout)
 
-        assert "error" in result.lower()
-        assert "timed out" in result
+        assert result == site_copy("max_iterations_no_summary", limit=agent.max_iterations)
         assert captured
         assert captured[0]["order"] == [pool[0]]
         assert agent._sticky_provider_order.active_index == 1
@@ -1181,7 +1181,7 @@ class TestStickyOrderSummaryPath:
             raise _StatusError(429, "rate limited")
 
         result, _captured = _run_iteration_summary(agent, raise_429)
-        assert "error" in result.lower()
+        assert result == site_copy("max_iterations_no_summary", limit=agent.max_iterations)
         assert agent._sticky_provider_order.active_index == 0
         assert _provider_preferences_for_agent(agent)["order"] == [pool[0]]
 
@@ -1236,8 +1236,7 @@ class TestStickyOrderSummaryPath:
         ):
             result, _captured = _run_iteration_summary(agent, raise_timeout)
 
-        assert "error" in result.lower()
-        assert "timed out" in result
+        assert result == site_copy("max_iterations_no_summary", limit=agent.max_iterations)
         assert agent._sticky_provider_order.active_index == 0
 
 

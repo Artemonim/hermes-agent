@@ -157,7 +157,7 @@ def test_turn_route_injects_flex_for_openrouter_variant():
 def test_load_service_tier_accepts_flex(monkeypatch):
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {"agent": {"service_tier": "FLEX"}},
     )
 
@@ -189,10 +189,9 @@ async def test_session_fast_override_beats_config_default(monkeypatch, tmp_path)
     runner = _make_runner()
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {"agent": {"service_tier": "fast"}},
     )
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
@@ -255,7 +254,7 @@ async def test_handle_fast_status_shows_flex(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {
             "agent": {
                 "service_tier": "",
@@ -288,7 +287,7 @@ async def test_handle_fast_switch_gated_normal_always_available(monkeypatch, tmp
     )
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {
             "agent": {
                 "service_tier": "flex",
@@ -360,7 +359,7 @@ async def test_fast_status_uses_persisted_model_after_restart(monkeypatch, tmp_p
     )
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {
             "agent": {
                 "service_tier": "priority",
@@ -403,7 +402,7 @@ async def test_fast_status_uses_channel_override_model(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {
             "agent": {
                 "service_tier": "priority",
@@ -465,21 +464,17 @@ async def test_fast_status_and_turn_agree_on_empty_default(monkeypatch, tmp_path
     assert expected
 
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
-    monkeypatch.setattr(
-        gateway_run,
-        "_load_gateway_config",
-        lambda: {"model": {"default": "", "provider": "openai-codex"}},
-    )
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "")
     _patch_empty_default_runtime(monkeypatch, provider="openai-codex")
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {
+            "model": {"default": "", "provider": "openai-codex"},
             "agent": {
                 "service_tier": "priority",
                 "service_tier_overrides": {expected: "flex"},
-            }
+            },
         },
     )
 
@@ -620,7 +615,7 @@ async def test_fast_status_skips_credential_rehydrate(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {
             "agent": {
                 "service_tier": "priority",

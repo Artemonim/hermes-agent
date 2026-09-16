@@ -27,7 +27,7 @@ from agent.error_classifier import FailoverReason, classify_api_error
 from agent.micro_compaction import MicroCompactionMixin
 from agent.prompt_builder import STEER_DISPLAY_KIND
 from agent.model_metadata import (
-    MINIMUM_CONTEXT_LENGTH, get_model_context_length, estimate_messages_tokens_rough, estimate_tokens_rough,
+    CHARS_PER_TOKEN, MINIMUM_CONTEXT_LENGTH, get_model_context_length, estimate_messages_tokens_rough, estimate_tokens_rough,
     strip_opaque_replay_items,
 )
 from agent.redact import redact_sensitive_text
@@ -955,8 +955,8 @@ def _collect_protected_skill_names(messages: List[Dict[str, Any]], prune_boundar
     }
 
 
-_CHARS_PER_TOKEN = 4
-# Native audio is current-turn-only, but the compressor may still see the clip.
+_CHARS_PER_TOKEN = CHARS_PER_TOKEN
+# * Native audio is current-turn-only, but the compressor may still see the clip.
 _AUDIO_TOKEN_ESTIMATE = 2000
 _AUDIO_CHAR_EQUIVALENT = _AUDIO_TOKEN_ESTIMATE * _CHARS_PER_TOKEN
 _SUMMARY_FAILURE_COOLDOWN_SECONDS = 600

@@ -284,7 +284,7 @@ class TestServiceTierEscalationLoaders:
 
         monkeypatch.setattr(
             gateway_run,
-            "_load_gateway_runtime_config",
+            "_load_gateway_config",
             lambda: {
                 "agent": {
                     "service_tier_escalation": {
@@ -303,7 +303,7 @@ class TestServiceTierEscalationLoaders:
     def test_gateway_loader_defaults_disabled(self, monkeypatch):
         import gateway.run as gateway_run
 
-        monkeypatch.setattr(gateway_run, "_load_gateway_runtime_config", lambda: {})
+        monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
         cfg = gateway_run.GatewayRunner._load_service_tier_escalation()
         assert cfg.enabled is False
 

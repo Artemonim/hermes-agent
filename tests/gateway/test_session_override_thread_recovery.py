@@ -73,7 +73,7 @@ def _patch_fast_gateway(monkeypatch, tmp_path):
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
     monkeypatch.setattr(
         gateway_run,
-        "_load_gateway_runtime_config",
+        "_load_gateway_config",
         lambda: {"agent": {"service_tier": ""}},
     )
 

@@ -215,7 +215,7 @@ class TestGatewaySessionResolve:
         )
         monkeypatch.setattr(
             gateway_run,
-            "_load_gateway_runtime_config",
+            "_load_gateway_config",
             lambda: {
                 "agent": {
                     "service_tier": "default",
