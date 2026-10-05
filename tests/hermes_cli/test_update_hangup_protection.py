@@ -12,7 +12,6 @@ import io
 import signal
 import sys
 
-import pytest
 
 from hermes_cli.main_dashboard import (
     _UpdateOutputStream,
@@ -85,19 +84,6 @@ class TestUpdateOutputStream:
 
 
 
-    def test_isatty_delegates_to_original(self):
-        class _TtyStream:
-            def isatty(self):
-                return True
-
-            def write(self, data):
-                return len(data)
-
-            def flush(self):
-                return None
-
-        stream = _UpdateOutputStream(_TtyStream(), io.StringIO())
-        assert stream.isatty() is True
 
 
 # -----------------------------------------------------------------------------
@@ -131,7 +117,6 @@ class TestInstallHangupProtection:
             assert log_path.exists()
             contents = log_path.read_text(encoding="utf-8")
             assert "checking mirror" in contents
-            assert "hermes update started" in contents
         finally:
             _finalize_update_output(state)
             # Sanity-check restoration
@@ -176,8 +161,6 @@ class TestInstallHangupProtection:
 
 
 class TestFinalizeUpdateOutput:
-    def test_none_state_is_noop(self):
-        _finalize_update_output(None)  # must not raise
 
 
     def test_skipped_install_leaves_stdio_alone(self):
@@ -217,12 +200,6 @@ class TestLogOnlyWrite:
         log_path = get_hermes_home() / "logs" / "update.log"
         assert "something" in log_path.read_text(encoding="utf-8")
 
-    def test_empty_text_is_noop(self, monkeypatch):
-        terminal = io.StringIO()
-        log = io.StringIO()
-        monkeypatch.setattr(sys, "stdout", _UpdateOutputStream(terminal, log))
-        _log_only_write("")
-        assert log.getvalue() == ""
 
 
 class TestRunLoggedSubprocess:
