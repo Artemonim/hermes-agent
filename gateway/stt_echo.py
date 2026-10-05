@@ -5,6 +5,7 @@ from __future__ import annotations
 import html
 from typing import Any, Callable, Dict, List, Optional
 
+from agent.i18n import t
 
 _TELEGRAM_EXPANDABLE_OPEN = "<blockquote expandable>"
 _TELEGRAM_EXPANDABLE_CLOSE = "</blockquote>"
@@ -30,15 +31,16 @@ def format_stt_transcript_echo(transcript: str, platform: Optional[Any] = None) 
 
     Telegram receives an HTML expandable blockquote (collapsed quote) so long
     transcripts stay out of the way and markdown characters in the transcript
-    cannot break formatting. Other platforms keep the classic ``🎙️ "..."``
-    plain line.
+    cannot break formatting. Other platforms use the localized
+    ``gateway.voice.transcript_echo_short`` line.
     """
     text = (transcript or "").strip("\n")
     if not text.strip():
         return "🎙️"
     if _is_telegram_platform(platform):
         return _format_telegram_expandable_stt_echo(text)
-    return f'🎙️ "{text}"'
+    # * Locale catalogs own the quote marks (en: "...", uk: «...»).
+    return t("gateway.voice.transcript_echo_short", text=text)
 
 
 def stt_echo_metadata(

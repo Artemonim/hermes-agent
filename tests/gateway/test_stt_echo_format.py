@@ -28,6 +28,27 @@ def test_non_telegram_keeps_classic_quoted_line():
     assert stt_echo_metadata(Platform.DISCORD, {"thread_id": 1}) == {"thread_id": 1}
 
 
+def test_non_telegram_echo_uses_localized_transcript_echo_short(monkeypatch):
+    """Non-Telegram echoes follow ``gateway.voice.transcript_echo_short``; Telegram stays HTML."""
+    from agent import i18n
+    from agent.i18n import t
+
+    monkeypatch.setenv("HERMES_LANGUAGE", "uk")
+    i18n.reset_language_cache()
+    try:
+        discord_echo = format_stt_transcript_echo("hello once", Platform.DISCORD)
+        telegram_echo = format_stt_transcript_echo("hello once", Platform.TELEGRAM)
+        catalog_echo = t("gateway.voice.transcript_echo_short", text="hello once")
+    finally:
+        monkeypatch.delenv("HERMES_LANGUAGE", raising=False)
+        i18n.reset_language_cache()
+
+    assert catalog_echo == "🎙️ «hello once»"
+    assert discord_echo == catalog_echo
+    assert telegram_echo == "🎙️\n<blockquote expandable>hello once</blockquote>"
+    assert "«" not in telegram_echo
+
+
 def test_telegram_uses_html_expandable_blockquote():
     formatted = format_stt_transcript_echo("hello once", Platform.TELEGRAM)
 
