@@ -15,7 +15,9 @@ from hermes_cli.auth import (
     _read_codex_tokens,
     resolve_codex_runtime_credentials,
 )
+from hermes_cli.auth_codex import _codex_pool_route_base_url
 from hermes_cli.runtime_provider import resolve_runtime_provider
+from hermes_time import safe_strftime
 
 if TYPE_CHECKING:
     from typing import TypeGuard
@@ -67,6 +69,9 @@ class AccountUsageSnapshot:
     credits_balance: Optional[float] = None
     rows: tuple[AccountUsageRow, ...] = ()
     details_structured: bool = False  # * True ⇒ rows fully cover every `details` line
+    # Exact decoded provider response body (no headers/credentials) for integrations that need
+    # fields Hermes does not normalize yet. Only populated by providers that fetch a JSON body.
+    raw: Optional[dict] = None
 
     @property
     def available(self) -> bool:
@@ -100,7 +105,7 @@ def _parse_dt(value: Any) -> Optional[datetime]:
 def _format_reset(dt: Optional[datetime]) -> str:
     if not dt:
         return "unknown"
-    stamp = dt.astimezone().strftime("%Y-%m-%d %H:%M %Z")
+    stamp = safe_strftime(dt.astimezone(), "%Y-%m-%d %H:%M %Z")
     total_seconds = int((dt - _utc_now()).total_seconds())
     if total_seconds <= 0:
         return f"now ({stamp})"
@@ -280,11 +285,28 @@ def _nous_logged_in() -> bool:
 
 
 def _fetch_portal_account(timeout: float):
-    """Wall-clock-bounded fresh portal account fetch (raises on any failure/timeout)."""
-    import concurrent.futures
+    """Wall-clock-bounded fresh portal account fetch (raises on any failure/timeout).
+
+    No ``with`` block on purpose: ``Executor.__exit__`` joins the worker via
+    ``shutdown(wait=True)``, so a portal that accepts the connection but never
+    answers would hold the caller until the provider's own timeout instead of
+    ``timeout``. The abandoned daemon worker runs on to its own network timeout
+    and never blocks the caller or process exit; its eventual exception is
+    drained so GC never logs "exception was never retrieved"."""
+    import contextvars
     from hermes_cli.nous_account import get_nous_portal_account_info
-    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
-        return pool.submit(get_nous_portal_account_info, force_fresh=True).result(timeout=timeout)
+    from tools.daemon_pool import DaemonThreadPoolExecutor
+
+    context = contextvars.copy_context()
+    pool = DaemonThreadPoolExecutor(max_workers=1)
+    future = pool.submit(context.run, get_nous_portal_account_info, force_fresh=True)
+    try:
+        return future.result(timeout=timeout)
+    except BaseException:
+        future.add_done_callback(lambda f: f.exception())
+        raise
+    finally:
+        pool.shutdown(wait=False)
 
 
 def nous_credits_lines(*, markdown: bool = False, timeout: float = 10.0) -> list[str]:
@@ -430,10 +452,11 @@ def _resolve_codex_usage_credentials(
             if entry is None:
                 raise RuntimeError("Could not refresh the Codex credential this session runs on")
             refreshed_key = entry.runtime_api_key
-            # * Account id comes from the refreshed token so a 401 retry keeps ChatGPT-Account-Id.
+            # * Account id comes from the refreshed token so a 401 retry keeps ChatGPT-Account-ID.
+            # * Pool rows keep the canonical URL; a gateway key must go to its route host (#121486).
             return (
                 refreshed_key,
-                str(entry.runtime_base_url or base_url or "").strip(),
+                _codex_pool_route_base_url(entry.runtime_base_url or base_url),
                 codex_account_id_from_token(refreshed_key),
             )
         # * Singleton matches the live key: fall through to tier 2 with force_refresh.
@@ -469,8 +492,13 @@ def _resolve_codex_usage_credentials(
     entry = load_pool("openai-codex").select()
     if entry is None:
         raise RuntimeError("No available openai-codex credential in credential pool")
+    # * Pool rows keep the canonical URL; a gateway key must go to its route host, not chatgpt.com (#121486).
     selected_key = entry.runtime_api_key
-    return selected_key, str(entry.runtime_base_url or base_url or "").strip(), codex_account_id_from_token(selected_key)
+    return (
+        selected_key,
+        _codex_pool_route_base_url(entry.runtime_base_url or base_url),
+        codex_account_id_from_token(selected_key),
+    )
 
 
 def _codex_banked_resets(payload: dict) -> int:
@@ -479,8 +507,22 @@ def _codex_banked_resets(payload: dict) -> int:
 
 
 def _codex_headers(token: str, account_id: Optional[str]) -> dict[str, str]:
-    return {"Authorization": f"Bearer {token}", "Accept": "application/json", "User-Agent": "codex-cli",
-            **({"ChatGPT-Account-Id": account_id} if account_id else {})}
+    """auth.json's ``account_id`` wins over the JWT claim; the JWT still supplies the residency header."""
+    from agent.codex_headers import codex_account_headers
+    headers = {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "User-Agent": "codex-cli",
+        **codex_account_headers(token),
+        **({"ChatGPT-Account-ID": account_id} if account_id else {}),
+    }
+    # * HTTP names are case-insensitive. Keep the canonical ChatGPT-Account-ID key
+    # * and the historical ChatGPT-Account-Id spelling so lookups of either form
+    # * agree; httpx collapses the pair on the wire.
+    account_header = headers.get("ChatGPT-Account-ID")
+    if account_header:
+        headers["ChatGPT-Account-Id"] = account_header
+    return headers
 
 
 def _get_json(url: str, headers: dict[str, str], *, timeout: float) -> dict:
@@ -509,6 +551,34 @@ def _usage_windows(
     return windows
 
 
+# Published Codex quota windows by ``limit_window_seconds``: 5h session and 7-day weekly.
+_CODEX_WINDOW_LABELS_BY_SECONDS = {18000: ("Session", "session"), 604800: ("Weekly", "weekly")}
+_CODEX_WINDOW_POSITIONAL_LABELS = (
+    ("primary_window", "Session", "session"),
+    ("secondary_window", "Weekly", "weekly"),
+)
+
+
+def _codex_window_labels(rate_limit: dict) -> tuple[tuple[str, str, str], ...]:
+    """Label Codex windows by their published duration, not response position (#65387).
+
+    The usage API keys windows ``primary_window``/``secondary_window`` by position; when only the
+    weekly limit is returned it occupies ``primary_window`` and the positional mapping mislabeled it
+    ``Session``. Windows whose ``limit_window_seconds`` is missing or unrecognized keep the legacy
+    positional label so duration-less payloads render exactly as before.
+    """
+    labels = []
+    for key, fallback, fallback_key in _CODEX_WINDOW_POSITIONAL_LABELS:
+        window = rate_limit.get(key) or {}
+        seconds = window.get("limit_window_seconds") if isinstance(window, dict) else None
+        if _is_num(seconds) and int(seconds) in _CODEX_WINDOW_LABELS_BY_SECONDS:
+            label, label_key = _CODEX_WINDOW_LABELS_BY_SECONDS[int(seconds)]
+        else:
+            label, label_key = fallback, fallback_key
+        labels.append((key, label, label_key))
+    return tuple(labels)
+
+
 def _plural(count: int) -> str:
     return "s" if count != 1 else ""
 
@@ -530,11 +600,8 @@ def _fetch_codex_account_usage(
         payload = _get_json(
             _codex_backend_urls(resolved_base_url)[0], _codex_headers(token, account_id), timeout=15.0,
         )
-    windows = _usage_windows(
-        payload.get("rate_limit") or {},
-        (("primary_window", "Session", "session"), ("secondary_window", "Weekly", "weekly")),
-        "used_percent", "reset_at",
-    )
+    rate_limit = payload.get("rate_limit") or {}
+    windows = _usage_windows(rate_limit, _codex_window_labels(rate_limit), "used_percent", "reset_at")
     details: list[str] = []
     rows: list[AccountUsageRow] = []
     count = _codex_banked_resets(payload)
@@ -554,6 +621,7 @@ def _fetch_codex_account_usage(
         "openai-codex", "usage_api", windows, details,
         plan=_title_case_slug(payload.get("plan_type")),
         credits_balance=credits_balance, rows=tuple(rows), details_structured=True,
+        raw=payload,
     )
 
 
@@ -774,11 +842,37 @@ _USAGE_FETCHERS: dict[str, Callable[[Optional[str], Optional[str]], Optional[Acc
 SUPPORTED_ACCOUNT_USAGE_PROVIDERS = frozenset(_USAGE_FETCHERS)
 
 
+# Wall-clock bound on a plugin profile's ``fetch_account_usage`` hook. The built-in fetchers above carry
+# their own httpx timeouts; a plugin hook is arbitrary code, and the gateway/TUI ``/usage`` paths await
+# this function with no deadline of their own (only the CLI wraps it in a 10 s future), so the bound
+# lives here where every surface shares it.
+PLUGIN_USAGE_HOOK_DEADLINE_S = 10.0
+
+
+def _call_plugin_usage_hook(profile, base_url: Optional[str], api_key: Optional[str]) -> Optional[AccountUsageSnapshot]:
+    """Run the profile hook under the shared deadline; past it → None. Exceptions re-raise in the
+    caller so ``fetch_account_usage`` fails open without a worker-thread traceback on ``/usage``."""
+    from agent.deadline import run_bounded_sync
+    from providers.base import ProviderProfile
+
+    if type(profile).fetch_account_usage is ProviderProfile.fetch_account_usage:
+        return None  # base no-op: no thread to spawn
+    bounded = run_bounded_sync(
+        lambda: profile.fetch_account_usage(base_url=base_url, api_key=api_key),
+        PLUGIN_USAGE_HOOK_DEADLINE_S, label="plugin-account-usage")
+    return None if bounded.timed_out else bounded.value
+
+
 def fetch_account_usage(
     provider: Optional[str], *, base_url: Optional[str] = None, api_key: Optional[str] = None,
 ) -> Optional[AccountUsageSnapshot]:
     fetcher = _USAGE_FETCHERS.get(str(provider or "").strip().lower())
     try:
-        return fetcher(base_url, api_key) if fetcher else None
+        if fetcher:
+            return fetcher(base_url, api_key)
+        from providers import get_provider_profile
+
+        profile = get_provider_profile(str(provider or "").strip().lower())
+        return _call_plugin_usage_hook(profile, base_url, api_key) if profile else None
     except Exception:
         return None

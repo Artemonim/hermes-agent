@@ -5,6 +5,8 @@ listing/browsing stored rows, spawn-tree snapshots, event replay and the statele
 
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 
 from .base import JsonValue, Params, Result, WireEnum
@@ -33,6 +35,8 @@ class InflightTurn(Result):
     assistant: str = ""
     streaming: bool = False
     user: str = ""
+    display_kind: str | None = None
+    display_metadata: dict[str, JsonValue] | None = None
     corrections: list[str] | None = None
     correction_offsets: list[int] | None = None
     error: str | None = None
@@ -117,6 +121,9 @@ class SessionCreateParams(ProfileParams):
     cols: int | None = None
     source: str | None = None
     cwd: str | None = None
+    # #52589: provenance for ``cwd`` — true only for a deliberate workspace pick;
+    # an inherited app-global workspace must yield to a named profile's terminal.cwd.
+    cwd_explicit: bool | None = None
     messages: list[SeedMessage] | None = None
     parent_session_id: str | None = None
     title: str | None = None
@@ -124,10 +131,14 @@ class SessionCreateParams(ProfileParams):
     provider: str | None = None
     reasoning_effort: str | None = None
     fast: bool | None = None  # presence is the contract: omitted inherits, true pins priority, false pins normal
+    service_tier: str | None = None
     close_on_disconnect: bool = False
     hidden: bool = False
     room_plumbing: bool = False
     follow_profile_config: bool = False
+    # #65410: stable caller-chosen key so a retried create (response lost in
+    # transit) returns the SAME session instead of a duplicate child.
+    idempotency_key: str | None = None
 
 
 class SessionCreateResult(Result):
@@ -140,6 +151,31 @@ class SessionCreateResult(Result):
 
 method("session.create", params=SessionCreateParams, result=SessionCreateResult,
        doc="Mint a live session (agent builds after the reply); a DB row appears on the first prompt unless seeded.")
+
+
+class SessionBranchStoredParams(ProfileParams):
+    parent_session_id: str = Field(min_length=1)
+    cols: int | None = None
+    source: str | None = None
+    cwd: str | None = None
+    # #65410: the desktop's whole-session branch rides the same create plumbing and
+    # now always sends the caller's stable key (its retry path reuses it). Optional
+    # so an older client that omits it keeps the historic behaviour.
+    idempotency_key: str | None = None
+
+
+class SessionBranchStoredResult(Result):
+    session_id: str
+    stored_session_id: str
+    message_count: int
+    messages_omitted: bool
+    info: SessionLiveInfo
+
+
+method("session.branch_stored", params=SessionBranchStoredParams, result=SessionBranchStoredResult,
+       doc="Whole-session branch of a stored parent: the owning backend reads and copies the transcript, "
+           "which never crosses the wire (a separate method so an older gateway fails loudly, not with an empty "
+           "branch).")
 
 
 # ── session.resume / activate ─────────────────────────────────────────────────────────────────
@@ -155,6 +191,9 @@ class SessionResumeParams(SessionParams):
     omit_messages: bool = False
     eager_build: bool = False
     close_on_disconnect: bool = False
+    # False: render image parts as "[image]" instead of their data URIs — a remote client reads a
+    # transcript in kilobytes instead of re-transmitting every stored attachment (#116511).
+    inline_images: bool = True
 
 
 class SessionResumeResult(LiveSessionSnapshot):
@@ -197,6 +236,7 @@ class SessionListRow(Result):
     preview: str = ""
     started_at: float = 0
     message_count: int = 0
+    live_message_count: int | None = None
     source: str = ""
 
 
@@ -283,7 +323,7 @@ class SessionSetHiddenParams(Params):
     """``session_id`` is a live runtime id first, else a stored id / key / title."""
 
     session_id: str
-    hidden: bool = True
+    hidden: bool
     profile: str | None = None
 
 
@@ -294,6 +334,24 @@ class SessionSetHiddenResult(Result):
 
 method("session.set_hidden", params=SessionSetHiddenParams, result=SessionSetHiddenResult,
        doc="Set/clear hidden (out of the default list, still resumable by its owner) on a session + lineage.")
+
+
+class SessionArchiveParams(Params):
+    """``session_id`` (or its ``session_key`` alias) is a live runtime id first, else a stored id / key / title."""
+
+    session_id: str | None = None
+    session_key: str | None = None
+    archived: bool = True
+    profile: str | None = None
+
+
+class SessionArchiveResult(Result):
+    archived: bool
+    session_key: str
+
+
+method("session.archive", params=SessionArchiveParams, result=SessionArchiveResult,
+       doc="Set/clear archived (soft-hide, messages kept) on a session + lineage; Desktop PATCH parity.")
 
 
 class SessionWorkspaceMoveParams(ProfileParams):
@@ -341,6 +399,9 @@ method("session.close", params=SessionCloseParams, result=SessionCloseResult,
 class SessionBranchParams(SessionParams):
     name: str | None = None
     count: int | None = None  # keep only the first N rows of the source history
+    # #65410: the desktop's mid-chat branch retry reuses the SAME key so a
+    # lost-response retry returns the SAME child instead of a duplicate.
+    idempotency_key: str | None = None
 
 
 class SessionBranchResult(Result):
@@ -357,8 +418,34 @@ method("session.branch", params=SessionBranchParams, result=SessionBranchResult,
        doc="Fork a live session into a new stored child that shares the parent's history so far.")
 
 
+class SessionBranchWholeParams(SessionParams):
+    name: str | None = None
+    # #65410: same retry contract as session.branch.
+    idempotency_key: str | None = None
+
+
+class SessionBranchWholeResult(Result):
+    session_id: str
+    stored_session_id: str
+    title: str
+    parent: str
+    message_count: int
+    messages_omitted: bool
+    info: SessionLiveInfo
+
+
+method("session.branch_whole", params=SessionBranchWholeParams, result=SessionBranchWholeResult,
+       doc="session.branch of the whole history without echoing the copied transcript back.")
+
+
+class UndoIntent(WireEnum):
+    RETRY = "retry"
+    UNDO = "undo"
+
+
 class SessionUndoParams(SessionParams):
-    pass
+    # ``retry``: the client resends the dropped turn (Ink /retry), so metrics count a retry, not an undo.
+    intent: UndoIntent | None = None
 
 
 class SessionUndoResult(Result):
@@ -419,6 +506,57 @@ class SessionUsageResult(Usage):
 
 method("session.usage", params=SessionUsageParams, result=SessionUsageResult,
        doc="Token / context / cost counters for the session (+ Nous credit lines when available).")
+
+
+class SessionAccountUsageParams(SessionParams):
+    pass
+
+
+class AccountUsageRow(Result):
+    """One localizable ``details`` counterpart from ``serialize_account_usage_snapshot``."""
+
+    key: str
+    args: dict[str, JsonValue] = Field(default_factory=dict)
+
+
+class AccountUsageWindow(Result):
+    """One quota window on the secret-free account-usage wire."""
+
+    label: str
+    used_percent: float | None = None
+    reset_at: str | None = None  # * ISO-8601 from serialize; omitted fields stay optional
+    detail: str | None = None
+    label_key: str | None = None
+    limit: float | None = None
+    limit_remaining: float | None = None
+    reset_interval: str | None = None
+
+
+class AccountUsageSnapshot(Result):
+    """Wire shape of ``agent.account_usage.serialize_account_usage_snapshot`` (never includes ``raw``)."""
+
+    available: bool
+    provider: str
+    source: str
+    fetched_at: str  # * ISO-8601
+    title: str
+    plan: str | None = None
+    windows: list[AccountUsageWindow]
+    details: list[str]
+    unavailable_reason: str | None = None
+    credits_balance: float | None = None
+    rows: list[AccountUsageRow] | None = None
+    details_structured: bool | None = None
+
+
+class SessionAccountUsageResult(Result):
+    status: Literal["ok", "unsupported", "unavailable"]
+    account_usage: AccountUsageSnapshot | None = None
+    reason: str | None = None
+
+
+method("session.account_usage", params=SessionAccountUsageParams, result=SessionAccountUsageResult,
+       doc="Secret-free provider quota snapshot for the session route.")
 
 
 class SessionContextBreakdownParams(SessionParams):
