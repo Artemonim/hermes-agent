@@ -8,7 +8,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
-import yaml
+import hermes_yaml as yaml
 
 import gateway.run as gateway_run
 from gateway.config import Platform
@@ -137,6 +137,9 @@ async def test_handle_fast_command_global_flag_persists_config(monkeypatch, tmp_
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
+    # /fast now resolves eligibility through the session runtime resolver; with
+    # no session override that path calls the real provider resolver, so stub it.
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {})
 
     response = await runner._handle_fast_command(_make_event("/fast fast --global"))
 
@@ -161,6 +164,9 @@ async def test_session_fast_override_beats_config_default(monkeypatch, tmp_path)
         lambda: {"agent": {"service_tier": "fast"}},
     )
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "gpt-5.4")
+    # Eligibility routes through the session runtime resolver; stub the real
+    # provider resolution the no-override path would otherwise trigger.
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {})
 
     event = _make_event("/fast normal")
     session_key = runner._session_key_for_source(event.source)
@@ -181,6 +187,7 @@ async def test_handle_fast_flex_is_session_scoped(monkeypatch, tmp_path):
     monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "openai/gpt-5")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {})
 
     event = _make_event("/fast flex")
     response = await runner._handle_fast_command(event)
@@ -200,6 +207,10 @@ async def test_fast_status_ungated_for_session_model(monkeypatch, tmp_path):
     monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
     monkeypatch.setattr(gateway_run, "_load_gateway_runtime_config", lambda: {"agent": {"service_tier": "flex"}})
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "claude-sonnet-4-6")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {
+        "model": "claude-sonnet-4-6", "provider": "anthropic",
+        "base_url": "https://api.anthropic.com", "api_key": "***",
+    })
 
     event = _make_event("/fast status")
     runner._try_send_choice_picker = AsyncMock(return_value=False)
@@ -216,6 +227,10 @@ async def test_fast_switch_uses_session_openrouter_route(monkeypatch, tmp_path):
         "model": {"provider": "anthropic", "default": "claude-sonnet-4-6"},
     })
     monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "claude-sonnet-4-6")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {
+        "model": "claude-sonnet-4-6", "provider": "anthropic",
+        "base_url": "https://api.anthropic.com", "api_key": "***",
+    })
 
     event = _make_event("/fast fast")
     session_key = runner._session_key_for_source(event.source)
@@ -267,7 +282,34 @@ def _openrouter_runtime(**extra):
     return runtime
 
 
-async def _drive_gateway_background_task(runner, source, *, pinned, service_tier, runtime=None):
+def _isolate_gateway_background_home(monkeypatch, tmp_path):
+    """Pin gateway home + iteration budget so /bg tests never touch launch-profile ``.env``.
+
+    ``_run_background_task_inner`` calls ``_current_max_iterations`` *before* vision
+    enrichment. That helper reloads dotenv via module-level ``gateway.run._hermes_home``
+    (import-time path, not the pytest ``HERMES_HOME``). Unstubbed, it reads the real
+    home and ``home_io_guard`` aborts the try — ``agent is None`` and vision never
+    sets ``started``.
+    """
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_current_max_iterations", lambda: 32)
+
+
+def _bind_gateway_background_adapter(runner, source):
+    """Wire the production delivery seam (``_delivery_adapter_for``, not ``_adapter_for_source``)."""
+    mock_adapter = AsyncMock()
+    mock_adapter.send = AsyncMock()
+    mock_adapter.extract_media = MagicMock(return_value=([], "ok"))
+    mock_adapter.extract_images = MagicMock(return_value=([], "ok"))
+    runner.adapters[source.platform] = mock_adapter
+    runner._delivery_adapter_for = lambda src: mock_adapter
+    runner._thread_metadata_for_source = lambda src, anchor=None: {}
+    return mock_adapter
+
+
+async def _drive_gateway_background_task(
+    runner, source, monkeypatch, tmp_path, *, pinned, service_tier, runtime=None,
+):
     """Run production ``_run_background_task`` with the ``run_sync`` body intact.
 
     Stubs adapter/runtime/pin/toolsets so the test can reach
@@ -275,12 +317,8 @@ async def _drive_gateway_background_task(runner, source, *, pinned, service_tier
     construction. The executor is inlined; dropping that post-ctor call goes red
     because ``_ProvenanceBgAgent`` starts unmarked.
     """
-    mock_adapter = AsyncMock()
-    mock_adapter.send = AsyncMock()
-    mock_adapter.extract_media = MagicMock(return_value=([], "ok"))
-    mock_adapter.extract_images = MagicMock(return_value=([], "ok"))
-    runner.adapters[source.platform] = mock_adapter
-    runner._adapter_for_source = lambda src: mock_adapter
+    _isolate_gateway_background_home(monkeypatch, tmp_path)
+    _bind_gateway_background_adapter(runner, source)
     runner._resolve_session_agent_runtime = lambda source=None, user_config=None, session_key=None: (
         "openai/gpt-5",
         runtime or _openrouter_runtime(),
@@ -417,7 +455,7 @@ def test_gateway_bg_unpinned_does_not_spurious_mark():
 
 
 @pytest.mark.asyncio
-async def test_gateway_bg_run_turn_applies_tier_provenance():
+async def test_gateway_bg_run_turn_applies_tier_provenance(monkeypatch, tmp_path):
     """``_run_background_task_inner`` must apply bake after construction.
 
     Seam: ``gateway/run_turn.py`` ``run_sync`` constructs ``AIAgent`` then calls
@@ -427,7 +465,7 @@ async def test_gateway_bg_run_turn_applies_tier_provenance():
     runner = _make_runner()
     source = _make_source()
     agent = await _drive_gateway_background_task(
-        runner, source, pinned=True, service_tier="priority",
+        runner, source, monkeypatch, tmp_path, pinned=True, service_tier="priority",
     )
     assert agent is not None
     assert agent._service_tier_session_pinned is True
@@ -439,7 +477,7 @@ async def test_gateway_bg_run_turn_applies_tier_provenance():
 
 
 @pytest.mark.asyncio
-async def test_gateway_bg_vision_stall_keeps_snapshotted_pin():
+async def test_gateway_bg_vision_stall_keeps_snapshotted_pin(monkeypatch, tmp_path):
     """Vision await must not pick up another session's shared ``_service_tier``.
 
     Session A is pinned normal. While /bg stalls on vision, session B writes
@@ -456,13 +494,9 @@ async def test_gateway_bg_vision_stall_keeps_snapshotted_pin():
         await release.wait()
         return "ENRICHED"
 
+    _isolate_gateway_background_home(monkeypatch, tmp_path)
     runner._enrich_message_with_vision = _stall_vision
-    mock_adapter = AsyncMock()
-    mock_adapter.send = AsyncMock()
-    mock_adapter.extract_media = MagicMock(return_value=([], "ok"))
-    mock_adapter.extract_images = MagicMock(return_value=([], "ok"))
-    runner.adapters[source.platform] = mock_adapter
-    runner._adapter_for_source = lambda src: mock_adapter
+    _bind_gateway_background_adapter(runner, source)
     runner._resolve_session_agent_runtime = lambda source=None, user_config=None, session_key=None: (
         "openai/gpt-5",
         _openrouter_runtime(),
@@ -505,3 +539,66 @@ async def test_gateway_bg_vision_stall_keeps_snapshotted_pin():
     assert "service_tier" not in (agent.request_overrides or {})
 
 
+_ASTRA_ON_CODEX = {"model": "gpt-6-astra", "provider": "openai-codex",
+                   "base_url": "https://chatgpt.com/backend-api/codex", "api_key": "***"}
+_GPT_ON_OPENROUTER = {"model": "openai/gpt-5.4", "provider": "openrouter",
+                      "base_url": "https://openrouter.ai/api/v1", "api_key": "***"}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("default_model, override, command, accepted, expected_tier", [
+    # #118761: Astra picked with session /model over a default /fast can't serve.
+    ("claude-sonnet-4-6", _ASTRA_ON_CODEX, "/fast ultrafast", True, "ultrafast"),
+    # OpenRouter is a first-class service-tier route (PR #104586); /fast maps to priority.
+    ("claude-opus-5-5", _GPT_ON_OPENROUTER, "/fast fast", True, "priority"),
+])
+async def test_fast_gate_follows_the_session_route(
+    monkeypatch, tmp_path, default_model, override, command, accepted, expected_tier,
+):
+    """Real fast-mode tables: /fast accepts exactly the tiers the session's next turn would send."""
+    runner = _make_runner()
+    event = _make_event(command)
+    session_key = runner._session_key_for_source(event.source)
+    runner._session_model_overrides[session_key] = dict(override)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: default_model)
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {})
+
+    response = await runner._handle_fast_command(event)
+
+    tier = runner._resolve_session_service_tier(session_key=session_key)
+    model, runtime = runner._resolve_session_agent_runtime(source=event.source)
+    route = runner._resolve_turn_agent_config("hi", model, runtime)
+    if accepted:
+        assert "only available" not in response
+        assert tier == expected_tier
+        assert route["request_overrides"] == {"service_tier": expected_tier}
+    else:
+        assert "only available" in response
+        assert session_key not in runner._session_service_tier_overrides
+
+
+@pytest.mark.asyncio
+async def test_fast_override_lands_under_the_recovered_telegram_topic_key(monkeypatch, tmp_path):
+    """/fast keys its eligibility check AND its tier override by the topic-recovered source the next
+    turn uses (#30479), not the raw lobby-shaped event source."""
+    import dataclasses
+
+    runner = _make_runner()
+    source = _make_source()
+    monkeypatch.setattr(runner, "_recover_telegram_topic_thread_id", lambda src: "77")
+    raw_key = runner._session_key_for_source(source)
+    turn_key = runner._session_key_for_source(dataclasses.replace(source, thread_id="77"))
+    assert turn_key != raw_key
+    runner._session_model_overrides[turn_key] = dict(_ASTRA_ON_CODEX)
+    monkeypatch.setattr(gateway_run, "_hermes_home", tmp_path)
+    monkeypatch.setattr(gateway_run, "_load_gateway_config", lambda: {})
+    monkeypatch.setattr(gateway_run, "_resolve_gateway_model", lambda config=None: "claude-sonnet-4-6")
+    monkeypatch.setattr(gateway_run, "_resolve_runtime_agent_kwargs", lambda: {})
+
+    response = await runner._handle_fast_command(MessageEvent(text="/fast fast", source=source, message_id="m1"))
+
+    assert "FAST" in response
+    assert runner._resolve_session_service_tier(session_key=turn_key) == "priority"
+    assert raw_key not in runner._session_service_tier_overrides

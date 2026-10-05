@@ -1,9 +1,9 @@
 """Bounded fast-mode windows (``/fast auto`` and ``/fast cold``).
 
-``agent.service_tier``: ``None`` (normal), ``"priority"`` (static fast), ``"flex"``
-(OpenRouter only), ``"auto"`` (every user turn opens a window of
-``agent.fast_auto_seconds``) or ``"cold"`` (only a session's first turn, no prior
-history, opens it).
+``agent.service_tier``: ``None`` (normal), ``"priority"`` / ``"ultrafast"`` /
+``"flex"`` (static tiers), ``"auto"`` (every user turn opens a window of
+``agent.fast_auto_seconds``) or ``"cold"`` (only a session's first turn, no
+prior history, opens it).
 
 Effective wire kwargs are resolved **per request** in
 :func:`effective_request_overrides`: session ``/fast`` pin >
@@ -11,7 +11,9 @@ Effective wire kwargs are resolved **per request** in
 raw user-supplied ``request_overrides`` ``service_tier``/``speed``.
 Opt-in TTFT escalation overlays last. Only per-request params
 (``service_tier`` / ``speed``) vary, so the prompt cache survives the
-boundary. ``extra_body`` is never rewritten here.
+boundary. ``extra_body`` is never rewritten here. Anthropic keeps a
+separate prompt cache per speed, so each Anthropic window boundary
+re-writes the prefix at the new speed.
 """
 
 from __future__ import annotations
@@ -24,6 +26,42 @@ BOUNDED_MODES = frozenset({"auto", "cold"})
 DEFAULT_WINDOW_SECONDS = 60
 # * Keys the CLI/gateway/TUI loaders (and /fast) may bake into request_overrides.
 TIER_WIRE_KEYS = ("service_tier", "speed")
+# Documented fast-mode rate-limit headers; a limit of 0 means the organization has no fast
+# capacity for the model (https://platform.claude.com/docs/en/build-with-claude/fast-mode).
+_FAST_LIMIT_HEADERS = ("anthropic-fast-input-tokens-limit", "anthropic-fast-output-tokens-limit")
+#: Tiers sent on every request of the session. Ultrafast is OpenAI-only and gated per model;
+#: flex is OpenRouter-only (mapped in ``hermes_cli.models.resolve_service_tier_overrides``).
+STATIC_TIERS = frozenset({"priority", "ultrafast", "flex"})
+# Codex app-server names for wire tiers it accepts (turn/start.serviceTier); a tier missing here is not sent.
+CODEX_TIER_WORDS: dict[str, str] = {"priority": "fast"}
+NORMAL_TIER_WORDS = frozenset({"", "normal", "default", "standard", "off", "none"})
+# User/config word -> agent.service_tier. The single table every surface (config loaders, /fast
+# on CLI / gateway / TUI) parses through, so a new tier is one edit.
+SERVICE_TIER_WORDS: dict[str, str] = {
+    "fast": "priority", "priority": "priority", "on": "priority",
+    "flex": "flex",
+    "ultrafast": "ultrafast", "auto": "auto", "cold": "cold",
+}
+
+
+def parse_service_tier(raw: Any) -> str | None:
+    """``agent.service_tier`` for a user/config word; None for normal and for unknown words."""
+    value = str(raw or "").strip().lower()
+    return None if value in NORMAL_TIER_WORDS else SERVICE_TIER_WORDS.get(value)
+
+
+def parse_exact_service_tier(raw: Any) -> str:
+    """Strict :func:`parse_service_tier` for an explicit client pick: ``""`` pins normal, an unknown
+    word raises ``ValueError`` instead of silently reading as normal."""
+    value = str(raw or "").strip().lower()
+    if value not in NORMAL_TIER_WORDS and value not in SERVICE_TIER_WORDS:
+        raise ValueError(f"unknown service tier: {value}")
+    return parse_service_tier(value) or ""
+
+
+def service_tier_word(tier: Any) -> str:
+    """The user-facing word for a stored tier (``priority`` -> ``fast``, None/"" -> ``normal``)."""
+    return {"priority": "fast", None: "normal", "": "normal"}.get(tier, tier)
 
 
 def _agent_route(agent: Any) -> tuple[Any, Any, Any]:
@@ -44,7 +82,7 @@ def logical_service_tier_source(agent: Any) -> tuple[str | None, bool]:
     *configured* is True for that pin and for an explicit ``normal`` in
     per-model or global config; empty / missing global is not a source.
     """
-    from hermes_constants import parse_service_tier, resolve_service_tier_source
+    from hermes_constants import resolve_service_tier_source
 
     if getattr(agent, "_service_tier_session_pinned", False) is True:
         return parse_service_tier(getattr(agent, "service_tier", None)), True
@@ -164,6 +202,15 @@ def begin_turn(
     agent._fast_until = origin + max(window, 0.0)
 
 
+def _drop_unprovisioned_speed(agent: Any, overrides: dict[str, Any]) -> dict[str, Any]:
+    """Strip ``speed`` when this session learned the model has no fast capacity."""
+    if "speed" in overrides and getattr(agent, "model", None) in (
+        getattr(agent, "_fast_mode_unavailable_models", None) or ()
+    ):
+        overrides.pop("speed", None)
+    return overrides
+
+
 def _apply_escalation_overlay(agent: Any, overrides: dict[str, Any]) -> dict[str, Any]:
     """Last-step TTFT ladder overlay. No-op when escalation is disabled or gated."""
     try:
@@ -188,6 +235,7 @@ def effective_request_overrides(agent: Any) -> dict[str, Any]:
     keys (no ``service_tier`` on the wire).
     Canonical ``agent.request_overrides`` / ``agent.service_tier`` are never
     mutated. Other keys (including ``extra_body``) are copied as-is.
+    Models this session learned have no Anthropic fast capacity lose ``speed``.
     """
     overrides = dict(getattr(agent, "request_overrides", None) or {})
     baked = getattr(agent, "_framework_baked_tier_keys", None) or ()
@@ -198,18 +246,18 @@ def effective_request_overrides(agent: Any) -> dict[str, Any]:
         for key in TIER_WIRE_KEYS:
             overrides.pop(key, None)
     else:
-        return _apply_escalation_overlay(agent, overrides)
+        return _apply_escalation_overlay(agent, _drop_unprovisioned_speed(agent, overrides))
     mode = logical_service_tier(agent)
     model, provider, base_url = _agent_route(agent)
     if mode in BOUNDED_MODES:
         if time.monotonic() >= getattr(agent, "_fast_until", 0.0):
-            return _apply_escalation_overlay(agent, overrides)
+            return _apply_escalation_overlay(agent, _drop_unprovisioned_speed(agent, overrides))
         from hermes_cli.models import resolve_fast_mode_overrides
 
         overrides.update(
             resolve_fast_mode_overrides(model, provider=provider, base_url=base_url) or {}
         )
-        return _apply_escalation_overlay(agent, overrides)
+        return _apply_escalation_overlay(agent, _drop_unprovisioned_speed(agent, overrides))
     from hermes_cli.models import resolve_service_tier_overrides
 
     mapped = resolve_service_tier_overrides(
@@ -217,4 +265,30 @@ def effective_request_overrides(agent: Any) -> dict[str, Any]:
     )
     if mapped:
         overrides.update(mapped)
-    return _apply_escalation_overlay(agent, overrides)
+    return _apply_escalation_overlay(agent, _drop_unprovisioned_speed(agent, overrides))
+
+
+def fast_mode_unprovisioned(api_error: Any, api_kwargs: Any) -> bool:
+    """True for a 429 on a ``speed: "fast"`` request whose fast-mode limit header is 0. The
+    organization has no fast capacity for the model, so waiting or rotating keys cannot help."""
+    if getattr(api_error, "status_code", None) != 429 or not isinstance(api_kwargs, dict):
+        return False
+    if (api_kwargs.get("extra_body") or {}).get("speed") != "fast":
+        return False
+    headers = getattr(getattr(api_error, "response", None), "headers", None)
+    if headers is None:
+        return False
+    return any(str(headers.get(name, "")).strip() == "0" for name in _FAST_LIMIT_HEADERS)
+
+
+def mark_fast_mode_unavailable(agent: Any) -> bool:
+    """Stop sending ``speed`` for the current model for the rest of the session. False when the
+    model was already marked, so the caller retries at most once per model."""
+    model = getattr(agent, "model", None)
+    unavailable = getattr(agent, "_fast_mode_unavailable_models", None)
+    if not isinstance(unavailable, set):
+        unavailable = agent._fast_mode_unavailable_models = set()
+    if not model or model in unavailable:
+        return False
+    unavailable.add(model)
+    return True
