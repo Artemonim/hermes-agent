@@ -2335,6 +2335,8 @@ DEFAULT_CONFIG = {
     },
 
     "updates": {
+        # * Gateway /update branch override; empty follows the installation's source channel.
+        "branch": "",
         # Passive version/banner checks only; explicit `hermes update --check` remains enabled.
         "check": True,
         # Pre-update backup. quick = snapshot small critical state (pairing JSONs, cron jobs,
@@ -2343,9 +2345,7 @@ DEFAULT_CONFIG = {
         # <HERMES_HOME>/backups/ (``hermes import`` restores; slow on large homes; ``--backup``
         # forces once). off = none (``--no-backup`` forces once). Legacy booleans: true -> full,
         # false -> off.
-        # Pre-update safety backup — ONE consolidated mechanism, three modes: Files over 1 GiB (e.g. a
-        # bloated state.db) are skipped with a warning so the snapshot stays fast. This is the #48200
-        # (wrong-path wipe) safety net.
+        # * The snapshot is the wrong-path wipe safety net (#48200).
         "pre_update_backup": "quick",
         # Full backup zips to retain (older pruned after each success; floored to 1 so the newest is
         # always kept). The quick snapshot always keeps exactly 1.

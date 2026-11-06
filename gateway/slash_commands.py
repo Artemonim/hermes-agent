@@ -125,7 +125,7 @@ def _restart_notify_payload(event: MessageEvent) -> dict:
     return data
 
 
-def _spawn_detached_update(hermes_cmd, output_path, exit_code_path) -> None:
+def _spawn_detached_update(hermes_cmd, output_path, exit_code_path, *, branch: str | None = None) -> None:
     """Spawn ``hermes update --gateway`` detached so it survives the gateway restart it may trigger.
     setsid is portable (works where ``systemd-run --user`` lacks a D-Bus session); ``--gateway``
     enables file-based IPC so interactive prompts are forwarded; PYTHONUNBUFFERED lets the gateway
@@ -134,17 +134,24 @@ def _spawn_detached_update(hermes_cmd, output_path, exit_code_path) -> None:
     update must replace it), redirects both outputs to one file and writes the exit code."""
     import shutil
     import subprocess
+    update_args = ["update", "--gateway"]
+    if branch is not None:
+        if not isinstance(branch, str):
+            raise TypeError("updates.branch must be a string")
+        branch = branch.strip()
+        if branch:
+            update_args.append(f"--branch={branch}")
     if sys.platform == "win32":
         from hermes_cli._subprocess_compat import windows_detach_popen_kwargs
         subprocess.Popen(
             [sys.executable, "-c", _WINDOWS_UPDATE_HELPER, str(output_path), str(exit_code_path),
-             sys.executable, "-m", "hermes_cli.main", "update", "--gateway"],
+             sys.executable, "-m", "hermes_cli.main", *update_args],
             # detached-spawn: ok — /update runs `hermes update`, which must outlive the gateway it restarts
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, **windows_detach_popen_kwargs())
         return
-    hermes_cmd_str = " ".join(shlex.quote(part) for part in hermes_cmd)
+    hermes_cmd_str = " ".join(shlex.quote(part) for part in [*hermes_cmd, *update_args])
     update_cmd = (
-        f"PYTHONUNBUFFERED=1 {hermes_cmd_str} update --gateway"
+        f"PYTHONUNBUFFERED=1 {hermes_cmd_str}"
         f" > {shlex.quote(str(output_path))} 2>&1; "
         # Avoid `status=$?`: `status` is read-only in zsh and this template is reused in
         # macOS/zsh operator wrappers, so keep it zsh-safe even though bash runs it here.
@@ -1319,8 +1326,9 @@ class GatewaySlashCommandsMixin(
         """Handle /update — spawn ``hermes update`` detached (``setsid``) so it survives the gateway
         restart it may trigger; marker files let this or the next gateway process notify the user."""
         import json
-        from gateway.run import _hermes_home, _resolve_hermes_bin
+        from gateway.run import _hermes_home, _load_gateway_config, _resolve_hermes_bin
         from hermes_cli.config import is_managed, format_managed_message
+        from hermes_cli.config_backend import ConfigBackendUnavailable
         # Block non-messaging platforms (API server, webhooks, ACP); plugin platforms with
         # allow_update_command=True are also allowed.
         src = event.source
@@ -1376,8 +1384,11 @@ class GatewaySlashCommandsMixin(
         _tmp_pending.replace(pending_path)
         exit_code_path.unlink(missing_ok=True)
         try:
-            _spawn_detached_update(hermes_cmd, output_path, exit_code_path)
-        except Exception as e:
+            # * Slash dispatch binds the requester's runtime profile before reading its branch.
+            branch = cfg_get(_load_gateway_config(), "updates", "branch")
+            _spawn_detached_update(hermes_cmd, output_path, exit_code_path, branch=branch)
+        except (Exception, ConfigBackendUnavailable) as e:
+            logger.exception("Could not start detached gateway update")
             pending_path.unlink(missing_ok=True)
             exit_code_path.unlink(missing_ok=True)
             return t("gateway.update.start_failed", error=e)

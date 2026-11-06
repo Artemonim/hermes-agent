@@ -4,13 +4,18 @@ Tests both the _handle_update_command handler (spawns update process) and
 the _send_update_notification startup hook (sends results after restart).
 """
 
+import asyncio
 import json
 import os
+import shlex
+import sys
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch, MagicMock, AsyncMock
 
 import pytest
+import pytest_asyncio
 
 from gateway.config import Platform
 from gateway.platforms.event import MessageEvent
@@ -194,6 +199,180 @@ class TestHandleUpdateCommand:
         # start_new_session=True should be in kwargs
         call_kwargs = mock_popen.call_args[1]
         assert call_kwargs.get("start_new_session") is True
+
+
+def _write_update_profile(home, updates):
+    """Write a real profile config without borrowing the launch profile's settings."""
+    from hermes_cli.config import atomic_config_replace
+
+    atomic_config_replace(home / "config.yaml", {
+        "updates": updates,
+        "terminal": {"backend": "local", "cwd": str(home)},
+        "display": {"auto_prune": False},
+    })
+
+
+@pytest_asyncio.fixture
+async def update_profiles(tmp_path, monkeypatch):
+    """Keep dispatch, routing, config and markers real; replace only process creation."""
+    from gateway.config import GatewayConfig, PlatformConfig
+    from gateway.profile_routing import parse_profile_routes
+    from gateway.run import GatewayRunner, _profile_runtime_scope
+    from hermes_cli.profiles import get_profile_dir
+    from hermes_constants import get_hermes_home
+
+    monkeypatch.setattr(Path, "home", lambda: tmp_path)
+    launch = get_hermes_home()
+    routed = get_profile_dir("update-beta")
+    routed.mkdir(parents=True)
+    _write_update_profile(launch, {"branch": "launch-only"})
+    _write_update_profile(routed, {"branch": "dev"})
+    (launch / ".env").write_text("GATEWAY_ALLOWED_USERS=12345,54321\n", encoding="utf-8")
+    monkeypatch.setenv("HERMES_MANAGED", "false")
+    monkeypatch.setattr("gateway.run._hermes_home", launch)
+    config = GatewayConfig(
+        multiplex_profiles=True,
+        sessions_dir=launch / "sessions",
+        platforms={Platform.TELEGRAM: PlatformConfig(extra={"allow_admin_from": ["12345"]})},
+        profile_routes=parse_profile_routes([{
+            "name": "routed-update", "platform": "telegram", "profile": "update-beta", "chat_id": "67890",
+        }]),
+    )
+    with _profile_runtime_scope(launch, hydrate_secrets=False):
+        runner = GatewayRunner(config)
+    process = SimpleNamespace(calls=[], failure=None)
+
+    def popen(argv, **options):
+        process.calls.append((list(argv), options))
+        if process.failure is not None:
+            raise process.failure
+        return SimpleNamespace(pid=100)
+
+    monkeypatch.setattr("subprocess.Popen", popen)
+    try:
+        yield SimpleNamespace(launch=launch, routed=routed, runner=runner, process=process)
+    finally:
+        watcher = getattr(runner, "_update_notification_task", None)
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+        runner.close_all_session_db_handles()
+
+
+async def _request_routed_update(profiles, *, user_id="12345"):
+    """Enter through the message handler under the receiving bot's own scope."""
+    from gateway.run import _profile_runtime_scope
+    from hermes_constants import get_hermes_home
+
+    event = _make_event(user_id=user_id)
+    with _profile_runtime_scope(profiles.launch):
+        reply = await profiles.runner._handle_message(event)
+        assert get_hermes_home() == profiles.launch
+        # * Stop the real watcher before it can wait for a deliberately unlaunched updater.
+        watcher = getattr(profiles.runner, "_update_notification_task", None)
+        if watcher is not None:
+            watcher.cancel()
+            await asyncio.gather(watcher, return_exceptions=True)
+    return reply
+
+
+def _launched_updater_argv(call):
+    """Read the updater invocation at the native process boundary, including POSIX shell quoting."""
+    argv, options = call
+    assert not options.get("shell", False)
+    if sys.platform == "win32":
+        return argv[5:]
+    tokens = shlex.split(argv[-1])
+    return tokens[1:tokens.index(">")]
+
+
+class TestRoutedUpdateBranch:
+    """Observable /update scenarios for the branch selected by the requesting profile."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("branch", [" dev ", " feature/provider-quota ", "dev; echo 'quoted' $(calc) & --check=\"x\"\nnext"])
+    async def test_message_dispatch_uses_the_routed_profiles_branch_as_one_argument(self, update_profiles, branch):
+        """Catch unwired branch selection, launch-profile leakage and command/option injection."""
+        profiles = update_profiles
+        _write_update_profile(profiles.routed, {"branch": branch})
+        before = {home: (home / "config.yaml").read_bytes() for home in (profiles.launch, profiles.routed)}
+        environment = dict(os.environ)
+
+        await _request_routed_update(profiles)
+
+        assert len(profiles.process.calls) == 1
+        assert _launched_updater_argv(profiles.process.calls[0]) == [
+            sys.executable, "-m", "hermes_cli.main", "update", "--gateway", "--branch=" + branch.strip(),
+        ]
+        pending = json.loads((profiles.launch / ".update_pending.json").read_text(encoding="utf-8"))
+        assert pending["profile"] == "update-beta"
+        assert pending["chat_id"] == "67890" and pending["user_id"] == "12345"
+        assert not (profiles.routed / ".update_pending.json").exists()
+        assert {home: (home / "config.yaml").read_bytes() for home in before} == before
+        assert dict(os.environ) == environment
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("settings", [{}, {"branch": None}, {"branch": ""}, {"branch": " \t "}])
+    async def test_unset_branch_preserves_the_existing_updater_source_selection(self, update_profiles, settings):
+        """Catch an implicit dev/main override or inheritance from another profile when the setting is absent."""
+        profiles = update_profiles
+        _write_update_profile(profiles.routed, settings)
+
+        await _request_routed_update(profiles)
+
+        assert len(profiles.process.calls) == 1
+        assert _launched_updater_argv(profiles.process.calls[0]) == [
+            sys.executable, "-m", "hermes_cli.main", "update", "--gateway",
+        ]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("branch", [False, 7, ["dev"], {"name": "dev"}])
+    async def test_invalid_branch_type_refuses_launch_and_removes_pending_markers(self, update_profiles, branch, caplog):
+        """Catch malformed YAML launching an unintended channel or leaving a phantom update pending."""
+        profiles = update_profiles
+        _write_update_profile(profiles.routed, {"branch": branch})
+        (profiles.launch / ".update_exit_code").write_text("0", encoding="utf-8")
+
+        reply = await _request_routed_update(profiles)
+
+        assert profiles.process.calls == []
+        assert "updates.branch" in reply
+        assert not (profiles.launch / ".update_pending.json").exists()
+        assert not (profiles.launch / ".update_exit_code").exists()
+        assert any(record.exc_info and record.exc_info[0] is TypeError for record in caplog.records)
+
+    @pytest.mark.asyncio
+    async def test_failed_launch_cleans_markers_and_allows_a_later_update(self, update_profiles, caplog):
+        """Catch a failed detached spawn leaving stale success markers or blocking a corrected retry."""
+        profiles = update_profiles
+        profiles.process.failure = OSError("fixture-updater-unavailable")
+        (profiles.launch / ".update_exit_code").write_text("0", encoding="utf-8")
+
+        reply = await _request_routed_update(profiles)
+
+        assert "fixture-updater-unavailable" in reply
+        assert len(profiles.process.calls) == 1
+        assert not (profiles.launch / ".update_pending.json").exists()
+        assert not (profiles.launch / ".update_exit_code").exists()
+        assert any(record.exc_info and record.exc_info[0] is OSError for record in caplog.records)
+        profiles.process.failure = None
+
+        await _request_routed_update(profiles)
+
+        assert len(profiles.process.calls) == 2
+        assert _launched_updater_argv(profiles.process.calls[1])[-1] == "--branch=dev"
+        assert (profiles.launch / ".update_pending.json").exists()
+        assert not (profiles.launch / ".update_exit_code").exists()
+
+    @pytest.mark.asyncio
+    async def test_routed_update_preserves_the_receiving_bots_admin_gate(self, update_profiles):
+        """Catch an allowed chat participant reaching the updater through the routed profile's open policy."""
+        profiles = update_profiles
+
+        await _request_routed_update(profiles, user_id="54321")
+
+        assert profiles.process.calls == []
+        assert not (profiles.launch / ".update_pending.json").exists()
 
 
 # ---------------------------------------------------------------------------

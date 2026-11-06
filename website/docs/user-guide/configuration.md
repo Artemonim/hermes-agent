@@ -224,11 +224,14 @@ an override that permits prompting can still interrupt a background check.
 
 ```yaml
 updates:
+  branch: ""                    # * Optional source branch override for messaging /update
   pre_update_backup: quick       # quick (state snapshot, default) | full (snapshot + HERMES_HOME zip) | off
   backup_keep: 5                 # Keep this many full pre-update backup zips
   non_interactive_local_changes: stash  # stash | discard
   auto_switch_parked_branch: true       # auto-switch a clean, fully merged parked branch back to main
 ```
+
+Messaging `/update` reads `updates.branch` from the requesting profile's configuration and passes it as an explicit source branch to the updater. Set it to a maintained branch on the checkout's `origin`; an empty or unset value follows the installation's source channel. Terminal updates use their own `--branch` option.
 
 `pre_update_backup` is the single pre-update safety knob: `quick` (default) snapshots critical state files (pairing data, cron jobs, config, auth; files over 1 GiB are skipped) into `state-snapshots/`; `full` additionally zips all of `HERMES_HOME` into `backups/` and can add minutes on large homes; `off` disables both. Legacy booleans are honored (`true` → `full`, `false` → `off`).
 
